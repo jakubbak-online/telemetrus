@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TelemetryWorker")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b93c1e57d82d0d3cb50b775b39339f2afccd7399")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+731ad36b44337d5cd84d1ea4f0ef2fb0aacab757")]
 [assembly: System.Reflection.AssemblyProductAttribute("TelemetryWorker")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TelemetryWorker")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
