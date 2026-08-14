@@ -1,10 +1,46 @@
 # Telemetrus
 
+![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-AMQP-FF6600?logo=rabbitmq&logoColor=white)
+![InfluxDB](https://img.shields.io/badge/InfluxDB-2.x-22ADF6?logo=influxdb&logoColor=white)
+![SignalR](https://img.shields.io/badge/SignalR-realtime-512BD4)
+![xUnit](https://img.shields.io/badge/tests-xUnit-informational)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 *Polska wersja: [README.pl.md](README.pl.md)*
 
-A telemetry pipeline for IoT-style measurements: a REST API accepts readings, RabbitMQ queues them, a background worker checks their integrity (HMAC-SHA256) and writes them to InfluxDB, and a SignalR app pushes threshold alerts to the browser in real time.
+A small distributed telemetry pipeline for IoT-style measurements: a REST API accepts readings, RabbitMQ queues them, a background worker verifies their integrity (HMAC-SHA256) and writes them to InfluxDB, and a SignalR app pushes threshold alerts to the browser in real time.
 
-## Data flow
+Built as a two-person team project to practice message-driven architecture end to end — producer/consumer decoupling, dead-lettering, integrity verification, and realtime push — rather than a single CRUD app.
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Local Configuration](#local-configuration)
+- [Getting Started](#getting-started)
+- [Realtime Alerts Demo](#realtime-alerts-demo)
+- [Testing](#testing)
+- [API Reference](#api-reference)
+- [Component Deep Dive](#component-deep-dive)
+- [Troubleshooting](#troubleshooting)
+- [Security Considerations](#security-considerations)
+- [Roadmap](#roadmap)
+- [Team & Contributions](#team--contributions)
+- [Authors & License](#authors--license)
+
+## Highlights
+
+- **Message-driven architecture** — FrontApi never blocks on processing; RabbitMQ decouples ingestion from the worker, with durable queues and persistent messages so nothing is lost on a restart.
+- **Integrity verification with automatic dead-lettering** — every message is HMAC-SHA256 checked by the worker; anything corrupted, forged, or malformed is routed to a per-channel DLQ instead of silently dropped or crashing the worker.
+- **Realtime alerting** — an InfluxDB threshold check fires a webhook that a SignalR hub broadcasts to every connected browser over WebSocket, no polling, no page refresh.
+- **Load-tested, not just demoed** — a JMeter plan drives 1000 concurrent requests (20 threads) through the full API → queue → worker → InfluxDB path; see [jmeter/README.md](jmeter/README.md) for the scenario and results.
+- **Unit-tested integrity logic** — xUnit tests pin down that FrontApi and TelemetryWorker compute identical HMAC checksums, the assumption the whole security model rests on.
+- **One-command local infra** — RabbitMQ and InfluxDB run via Docker Compose with healthchecks gating application startup.
+
+## Architecture
 
 ```
 [Client / JMeter]
@@ -18,6 +54,165 @@ A telemetry pipeline for IoT-style measurements: a REST API accepts readings, Ra
                                                               ▼
                                                      [Browser / UI]
 ```
+
+A full step-by-step walkthrough of every component in this diagram is in [Component Deep Dive](#component-deep-dive).
+
+## Tech Stack
+
+| Technology | Used for |
+|---|---|
+| **.NET 8 / ASP.NET Core** | REST API (FrontApi), webhook + SignalR host (NotificationWebApp), `BackgroundService` worker (TelemetryWorker) |
+| **RabbitMQ** | AMQP broker decoupling producer and consumer — durable queues, persistent messages, ACK/NACK, dead-letter exchange |
+| **InfluxDB 2.x** | Time-series storage for readings, plus its built-in Checks + Notification Rules alerting engine |
+| **SignalR** | Realtime server → browser push (WebSocket, with SSE/long-polling fallback) |
+| **HMAC-SHA256** | Message integrity & authenticity between client, API, and worker |
+| **Docker Compose** | Local RabbitMQ + InfluxDB infrastructure with healthchecks |
+| **Apache JMeter** | Load-testing the full pipeline under concurrent traffic |
+| **xUnit** | Unit tests for the shared HMAC logic |
+| **PowerShell** | Demo and test-data generation scripts |
+
+*Why each of these, specifically, is discussed in [Component Deep Dive](#component-deep-dive).*
+
+## Project Structure
+
+```
+telemetrus/
+├── FrontApi/              REST API — validates & publishes measurements        (port 5000)
+├── TelemetryWorker/       BackgroundService — HMAC check, DLQ routing, InfluxDB writes
+├── NotificationWebApp/    Webhook receiver + SignalR hub + live alerts UI      (port 5002)
+├── Tests/                 xUnit tests for HMAC correctness across services
+├── jmeter/                JMeter load-test plan, generated test data, results
+├── scripts/                PowerShell demo & test-data generation scripts
+├── docs/                  Setup guides (InfluxDB alert configuration)
+├── docker-compose.yml     RabbitMQ + InfluxDB infrastructure
+├── dokumentacja.md        Extended project write-up (Polish, academic report)
+├── README.md / README.pl.md
+└── LICENSE                MIT
+```
+
+## Local Configuration
+
+The repository ships no real secrets. Before running it for the first time:
+
+1. Copy `.env.example` to `.env` and fill in your own InfluxDB token (for example, generate one with `openssl rand -base64 64`).
+2. Create `TelemetryWorker/appsettings.Development.json` with the same token value:
+   ```json
+   {
+     "InfluxDB": { "Token": "<same value as in .env>" }
+   }
+   ```
+   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment.
+3. `Hmac:SecretKey` in `FrontApi/appsettings.json` and `TelemetryWorker/appsettings.json` is a shared demo value (`telemetrus-demo-shared-secret`) used locally by both services and by the scripts in `scripts/`. It doesn't protect any real data, so it's fine to leave as-is for demo purposes — in a real deployment it would belong in a secrets manager instead.
+
+## Getting Started
+
+**Requirements:** .NET SDK 8.0 · Docker + Docker Compose · PowerShell 7+ (demo scripts) · Apache JMeter 5.6+ (load test)
+
+**1. Start the infrastructure**
+
+```bash
+docker compose up -d
+```
+
+- RabbitMQ management UI: [http://localhost:15672](http://localhost:15672) (`guest` / `guest`)
+- InfluxDB UI: [http://localhost:8086](http://localhost:8086) (`admin` / `admin12345`)
+
+**2. Start the three .NET apps** (each in its own terminal)
+
+```bash
+cd FrontApi && dotnet run             # accepts measurements, port 5000
+cd TelemetryWorker && dotnet run      # consumes the queue, writes to InfluxDB
+cd NotificationWebApp && dotnet run   # webhook + SignalR + UI, port 5002
+```
+
+**3. Open the alerts UI** — [http://localhost:5002](http://localhost:5002). The status indicator should switch to "Connected" (SignalR).
+
+**4. Send test measurements**
+
+```powershell
+pwsh scripts/send-measurements.ps1
+```
+
+This sends a batch of requests — valid ones, plus a few with a deliberately wrong checksum. Worth watching while it runs:
+
+1. **FrontApi** logs — Base64 decoding and publishing to the queue
+2. **TelemetryWorker** logs — `Checksum OK. Zapisuję do InfluxDB...` for valid messages, `[DLQ] Odrzucono wiadomość` for invalid ones
+3. **RabbitMQ panel** — `measurements.*` queues drain, `measurements.*.dlq` fills up
+4. **InfluxDB Data Explorer** — bucket `telemetry`, measurement `sensor_reading`, values plotted over time
+
+## Realtime Alerts Demo
+
+Following [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md):
+
+1. In InfluxDB, create a **Threshold Check** on `sensor_reading.value` (e.g. `> 80`).
+2. Add an **HTTP Notification Endpoint** pointing at `http://host.docker.internal:5002/webhook/influx`.
+3. Add a **Notification Rule** connecting the check to the endpoint.
+
+Then send a measurement that crosses the threshold:
+
+```powershell
+pwsh scripts/send-measurements.ps1 -HighValue
+```
+
+An alert appears in the browser at `http://localhost:5002` in real time — the whole path from API through the queue, worker, InfluxDB, webhook, and SignalR to the UI is exercised end to end.
+
+## Testing
+
+### Unit tests
+
+```bash
+cd Tests
+dotnet test
+```
+
+Verifies that FrontApi and TelemetryWorker agree on the HMAC computation — the foundation the whole integrity check rests on.
+
+### Load test (JMeter)
+
+The scenario ([jmeter/telemetrus-load-test.jmx](jmeter/telemetrus-load-test.jmx)) simulates many telemetry devices sending data concurrently: **20 threads**, 10 s ramp-up, 50 iterations each → **1000 requests total**, with a Gaussian timer (50 ms ± 20 ms) between requests to approximate realistic load.
+
+```powershell
+# 1. Generate input data (1000 rows with a valid HMAC by default)
+pwsh scripts/generate-jmeter-csv.ps1 -Count 1000
+
+# 2a. GUI run (live demo — chart + request tree)
+cd jmeter
+jmeter -t telemetrus-load-test.jmx
+
+# 2b. Headless run with an HTML report
+jmeter -n -t telemetrus-load-test.jmx -l results.jtl -e -o report
+```
+
+What to look at in the report: **throughput** (req/s), **response time** (median / p90 / p95 / p99), **error rate**, whether the `measurements.default` queue stays drained (worker keeping up), and whether `measurements.*.dlq` stays empty (correct HMAC key end to end). Full scenario details and how to read the results: [jmeter/README.md](jmeter/README.md).
+
+## API Reference
+
+**POST** `http://localhost:5000/measurement`
+
+```json
+{
+  "payload": "eyJkZXZpY2VJZCI6InNlbnNvci0xIiwidmFsdWUiOjIzLjV9",
+  "checksum": "a3f1...(64 hex characters)...",
+  "channel": "temperature"
+}
+```
+
+| Field | Description |
+|---|---|
+| `payload` | the JSON `{"deviceId":"...","value":0.0}`, Base64-encoded |
+| `checksum` | HMAC-SHA256 of the decoded JSON, keyed with `Hmac:SecretKey` |
+| `channel` | optional channel name (defaults to `default`), maps to the `measurements.{channel}` queue |
+
+| Code | Meaning |
+|---|---|
+| 200 | Message published to the queue |
+| 400 | Validation error (details in the `error` field) |
+| 500 | Could not connect to RabbitMQ |
+
+## Component Deep Dive
+
+<details>
+<summary><strong>Expand for a component-by-component walkthrough with source links</strong></summary>
 
 ### 1. Client (JMeter or a PowerShell script)
 
@@ -35,7 +230,7 @@ The REST API that accepts incoming data, validates it, and publishes it to the q
 - **middleware** ([Program.cs:19-39](FrontApi/Program.cs#L19-L39)) logs every request (method, path, first 200 characters of the body)
 - **validation** ([MeasurementController.cs](FrontApi/Controllers/MeasurementController.cs)) checks that `payload` and `checksum` are present, that `channel` has a valid name, decodes Base64, parses the JSON, and requires `deviceId` and a numeric `value`
 - **publisher** ([RabbitMqPublisher.cs](FrontApi/RabbitMqPublisher.cs)) sends the message to `measurements.{channel}` with `persistent=true`; queues are declared lazily on first publish
-- the API does **not** verify the HMAC, that is the Worker's job (separation of concerns): the API only guarantees the message is well-formed
+- the API does **not** verify the HMAC, that is the worker's job (separation of concerns): the API only guarantees the message is well-formed
 
 Invalid requests get a `400 Bad Request` and never reach the queue.
 
@@ -45,8 +240,6 @@ The message broker. Every channel gets a pair of queues:
 
 - `measurements.{channel}`: the main queue (durable, persistent messages)
 - `measurements.{channel}.dlq`: dead-letter queue, populated automatically via `x-dead-letter-exchange`
-
-Management UI: [http://localhost:15672](http://localhost:15672) (guest/guest).
 
 ### 4. TelemetryWorker ([TelemetryWorker/](TelemetryWorker/))
 
@@ -83,179 +276,24 @@ A SignalR client holding an open WebSocket connection. Every new alert from Infl
 
 ---
 
-## Local configuration
+**Why these technologies, specifically:**
 
-The repository does not ship any real secrets. Before running it for the first time:
+- **RabbitMQ**: a dead-letter exchange, persistent messages, and ACK/NACK come for free, exactly what a "verify then store" pipeline needs. Decoupling producer from consumer means the API stays responsive even if the worker is down.
+- **InfluxDB**: purpose-built for high-volume timestamped writes (bucket → measurement → tags → fields, queried with Flux), and its built-in Checks/Notification Rules meant no custom alerting engine had to be written.
+- **SignalR**: the standard .NET way to push server → browser without polling, with automatic transport negotiation (WebSocket → SSE → long polling).
+- **HMAC-SHA256**: gives both integrity and authenticity from a single shared secret. FrontApi only forwards the checksum; the worker verifies it, so a change to the data while it sits in RabbitMQ still gets caught.
+- **Base64**: packs the JSON payload into a text field that travels safely over JSON/HTTP, and mirrors a realistic IoT scenario where devices often send binary sensor data Base64-encoded.
 
-1. Copy `.env.example` to `.env` and fill in your own InfluxDB token (for example, generate one with `openssl rand -base64 64`).
-2. Create `TelemetryWorker/appsettings.Development.json` with the same token value:
-   ```json
-   {
-     "InfluxDB": { "Token": "<same value as in .env>" }
-   }
-   ```
-   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment.
-3. `Hmac:SecretKey` in `FrontApi/appsettings.json` and `TelemetryWorker/appsettings.json` is a shared demo value (`telemetrus-demo-shared-secret`) used locally by both services and by the scripts in `scripts/`. It doesn't protect any real data, so it's fine to leave as-is for demo purposes. In a real deployment it would belong in a secrets manager instead (see the technologies section below).
-
-## Running and demoing the system
-
-### Requirements
-
-- .NET SDK 8.0
-- Docker + Docker Compose
-- PowerShell 7+ (for the demo scripts)
-- Apache JMeter 5.6+ (for the load test)
-
-### Step 1: infrastructure (RabbitMQ + InfluxDB)
-
-```bash
-docker compose up -d
-```
-
-Check that it's up:
-
-- RabbitMQ: [http://localhost:15672](http://localhost:15672), login `guest` / `guest`
-- InfluxDB: [http://localhost:8086](http://localhost:8086), login `admin` / `admin12345`
-
-### Step 2: start the three .NET apps (each in its own terminal)
-
-**Terminal 1, FrontApi** (accepts measurements):
-
-```bash
-cd FrontApi
-dotnet run
-```
-
-**Terminal 2, TelemetryWorker** (consumes the queue, writes to InfluxDB):
-
-```bash
-cd TelemetryWorker
-dotnet run
-```
-
-**Terminal 3, NotificationWebApp** (webhook + SignalR + UI):
-
-```bash
-cd NotificationWebApp
-dotnet run
-```
-
-### Step 3: open the alerts UI
-
-[http://localhost:5002](http://localhost:5002)
-
-The status indicator in the top-right corner should switch to "Connected" (SignalR).
-
-### Step 4: send some test measurements
-
-```powershell
-pwsh scripts/send-measurements.ps1
-```
-
-The script sends a batch of requests: valid ones, plus a few with a deliberately wrong checksum.
-
-Worth watching while it runs:
-
-1. **FrontApi** logs: Base64 decoding and publishing to the queue
-2. **TelemetryWorker** logs: `Checksum OK. Zapisuję do InfluxDB...` for valid messages, `[DLQ] Odrzucono wiadomość — błąd integralności HMAC` for invalid ones
-3. the **RabbitMQ** panel ([http://localhost:15672](http://localhost:15672)): `measurements.*` queues drain, `measurements.*.dlq` fills up
-4. the **InfluxDB Data Explorer** ([http://localhost:8086](http://localhost:8086)): bucket `telemetry`, measurement `sensor_reading`, a chart of values over time
-
-### Step 5: configure an alert and watch the realtime UI
-
-Following [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md):
-
-1. in InfluxDB, create a **Threshold Check** on `sensor_reading.value` with a threshold (e.g. `> 80`)
-2. add an **HTTP Notification Endpoint** pointing at `http://host.docker.internal:5002/webhook/influx`
-3. add a **Notification Rule** connecting the check to the endpoint
-
-Then send a measurement that crosses the threshold:
-
-```powershell
-pwsh scripts/send-measurements.ps1 -HighValue
-```
-
-An alert will appear in the browser at `http://localhost:5002` in real time: the whole path from API through the queue, Worker, InfluxDB, webhook, and SignalR to the UI is now exercised end to end.
-
-### Step 6: JMeter load test
-
-The JMeter scenario simulates many telemetry devices sending data concurrently and checks how the whole API → queue → Worker → InfluxDB pipeline holds up under load.
-
-**Scenario** ([jmeter/telemetrus-load-test.jmx](jmeter/telemetrus-load-test.jmx)):
-
-- **Thread Group**: 20 threads, 10 s ramp-up, 50 iterations each → 1000 requests total
-- **CSV Data Set Config**: each thread reads its own rows from `test-data.csv` (payload, checksum, channel)
-- **HTTP Request Sampler**: `POST http://localhost:5000/measurement` with the JSON body from the CSV
-- **Gaussian Random Timer**: 50 ms ± 20 ms delay between requests, to approximate realistic load
-- **Response Assertion**: expects a `200` status code
-- **View Results Tree + Summary Report**: visualizes results and aggregate stats
-
-**Running it:**
-
-```powershell
-# 1. Generate the input data (1000 rows with a valid HMAC by default)
-pwsh scripts/generate-jmeter-csv.ps1 -Count 1000
-
-# 2a. Run with the GUI (for a live demo, shows the chart and request tree)
-cd jmeter
-jmeter -t telemetrus-load-test.jmx
-
-# 2b. Run headless with an HTML report (for documentation)
-jmeter -n -t telemetrus-load-test.jmx -l results.jtl -e -o report
-```
-
-**What to look at in the report:**
-
-- **Throughput** (requests/s): how many messages the API can handle
-- **Response time** (avg, median, 90th/95th/99th percentile): API latency
-- **Error rate**: whether every request ended with `200`
-- **Queue stability**: watch `measurements.default` in the RabbitMQ panel during the test, does the Worker keep up or does a backlog build?
-- **DLQ**: with a correct HMAC key, `measurements.*.dlq` should stay empty after the test
-
-Scenario details and how to read the results: [jmeter/README.md](jmeter/README.md).
-
-### Step 7: unit tests
-
-```bash
-cd Tests
-dotnet test
-```
-
-These verify that FrontApi and TelemetryWorker agree on the HMAC computation, the foundation the whole integrity check rests on.
-
----
-
-## API request format
-
-**POST** `http://localhost:5000/measurement`
-
-```json
-{
-  "payload": "eyJkZXZpY2VJZCI6InNlbnNvci0xIiwidmFsdWUiOjIzLjV9",
-  "checksum": "a3f1...(64 hex characters)...",
-  "channel": "temperature"
-}
-```
-
-| Field | Description |
-|---|---|
-| `payload` | the JSON `{"deviceId":"...","value":0.0}`, Base64-encoded |
-| `checksum` | HMAC-SHA256 of the decoded JSON, keyed with `Hmac:SecretKey` |
-| `channel` | optional channel name (defaults to `default`), maps to the `measurements.{channel}` queue |
-
-| Code | Meaning |
-|---|---|
-| 200 | Message published to the queue |
-| 400 | Validation error (details in the `error` field) |
-| 500 | Could not connect to RabbitMQ |
-
----
+</details>
 
 ## Troubleshooting
 
+<details>
+<summary><strong>Expand for common issues and fixes</strong></summary>
+
 **Worker can't connect to RabbitMQ.** Check `docker ps` and the port 5672 setting in `appsettings.json`.
 
-**Worker isn't writing to InfluxDB.** Check the token in `TelemetryWorker/appsettings.Development.json`, see "Local configuration" above. Also check the organization (`myorg`) and bucket (`telemetry`).
+**Worker isn't writing to InfluxDB.** Check the token in `TelemetryWorker/appsettings.Development.json`, see [Local Configuration](#local-configuration) above. Also check the organization (`myorg`) and bucket (`telemetry`).
 
 **DLQ keeps filling up.** The HMAC key is probably different between FrontApi and TelemetryWorker. Check `Hmac:SecretKey` in both `appsettings.json` files. Inspect the DLQ queues at [http://localhost:15672](http://localhost:15672).
 
@@ -263,26 +301,45 @@ These verify that FrontApi and TelemetryWorker agree on the HMAC computation, th
 
 **Webhook from InfluxDB never arrives.** The InfluxDB container can't resolve `localhost` as the host machine, use `http://host.docker.internal:5002/webhook/influx` instead.
 
----
+</details>
 
-## Technologies used
+## Security Considerations
 
-**.NET 8 / ASP.NET Core** powers all three applications. It provides the HTTP server, routing, dependency injection and middleware, used in FrontApi (controllers plus the logging middleware) and in NotificationWebApp (the webhook controller and the SignalR hub). `BackgroundService` is the base class for TelemetryWorker, letting it run a long-lived process inside the .NET host.
+| Threat | Vector | Risk | Mitigation in this project |
+|---|---|---|---|
+| Forged measurements | Attacker doesn't know the shared secret | Low | HMAC-SHA256 verification rejects any message with a wrong checksum |
+| Traffic interception | Plain HTTP, no TLS | High on untrusted networks | Out of scope for a local demo; terminate TLS at a reverse proxy for real deployment |
+| Replay attacks | Resending a captured valid request | Medium | Not currently mitigated — would need a timestamp/nonce plus an idempotency key |
+| API flooding (DoS) | No rate limiting | Medium | The JMeter test surfaces the current single-instance ceiling (~200 req/s); add rate limiting before an internet-facing deployment |
+| Injection via channel name | Untrusted `channel` field feeds into queue names | Low | Whitelisted to alphanumerics, `-`, `_` before it ever reaches RabbitMQ |
+| XSS in the alerts UI | Alert text from InfluxDB rendered in the browser | Low | Rendered via `textContent`, never `innerHTML` |
+| Secret sprawl | HMAC key & InfluxDB token live in config files | High in production | Fine for a local demo (see [Local Configuration](#local-configuration)); a real deployment needs a secrets manager (Key Vault / Vault) |
 
-**RabbitMQ** is the AMQP broker that decouples the producer (FrontApi) from the consumer (Worker): the API doesn't wait for a message to be processed, it just drops it on the queue and returns `200`. Mechanisms in use: durable queues (survive a broker restart), persistent messages, ACK/NACK (the Worker only acknowledges after a successful InfluxDB write), a dead-letter exchange (bad messages land in `.dlq`), and prefetch count (the Worker pulls one message at a time).
+**Production hardening we'd add before a real deployment:** TLS/HTTPS end to end, JWT bearer auth on the API, rate limiting, idempotency keys against replay, a secrets manager instead of `appsettings.json`, signed webhook payloads from InfluxDB, and CORS/CSP on the alerts UI.
 
-**InfluxDB 2.x** is a time-series database built for high-volume timestamped writes. Data is organized as bucket → measurement → tags (here, `deviceId`) → fields (here, `value`), queried with Flux. It also ships a built-in alerting engine: Checks that watch conditions on the data, and Notification Rules that trigger actions, including HTTP webhooks.
+## Roadmap
 
-**SignalR** is the .NET library for real-time server-to-client communication, using WebSocket with a fallback to SSE / long polling. `AlertHub` broadcasts a `ReceiveAlert` call to every connected browser, so once a webhook from InfluxDB reaches NotificationWebApp, the alert shows up in the UI without a page reload.
+Deliberately left for later, since none of it blocked showing a working end-to-end pipeline:
 
-**HMAC-SHA256** is a cryptographic checksum built from SHA-256 and a shared secret key. It guarantees both integrity (the data wasn't altered) and authenticity (the sender knew the key). FrontApi only forwards the checksum; the Worker is the one that verifies it, so even a change to the data while it sits in RabbitMQ gets caught and routed to the DLQ.
+- **Automated integration tests** — today the API → queue → worker → DB path is verified manually via `scripts/send-measurements.ps1`; `Testcontainers` spinning up RabbitMQ/InfluxDB in tests would make this repeatable in CI.
+- **Retry with backoff** — a transient InfluxDB timeout or `503` currently sends the message straight to the DLQ; 2-3 retries with exponential backoff would likely recover most of those.
+- **Shared `HmacHelper`** — currently duplicated between FrontApi and TelemetryWorker; extracting a `Telemetrus.Common` project would remove the duplication at the cost of one more project in the solution.
+- **Real observability** — logs only, today. Prometheus + Grafana would give actual visibility into queue depth, DLQ rate, and processing latency.
+- **A CI pipeline** — build + `dotnet test` on every PR.
 
-**Base64** is a binary-to-ASCII encoding, used here to pack the JSON payload into a text field that travels safely over JSON/HTTP. It also mirrors a realistic IoT scenario, where devices often send binary sensor data Base64-encoded.
+## Team & Contributions
 
-**Docker + Docker Compose** run RabbitMQ and InfluxDB in isolated containers with no local install required. `docker-compose.yml` defines both services, their ports, volumes (so data survives a container restart), environment variables, and healthchecks that gate application startup on the services actually being ready.
+A two-person team project.
 
-**Apache JMeter** drives the load test, simulating many concurrent HTTP clients. The scenario uses a Thread Group (number of virtual users), a CSV Data Set Config (each thread gets its own row of data), an HTTP Request Sampler, a Gaussian Timer (realistic gaps between requests), assertions, and a Summary Report / View Results Tree for the resulting statistics.
+| | Jakub Bąk | Martyna Wawak |
+|---|---|---|
+| Primary focus | TelemetryWorker (consumer, HMAC check, InfluxDB writer), NotificationWebApp (webhook, SignalR hub, UI), Docker Compose, InfluxDB alert setup | FrontApi (controller, middleware, publisher), xUnit tests, JMeter plan and CSV generator |
+| Shared | `HmacHelper` contract, the `QueueMessage` schema between FrontApi and the worker, `docker-compose.yml`, and this documentation | |
 
-**xUnit** is the .NET unit testing framework, used here to check that `HmacHelper` in FrontApi and in TelemetryWorker produce identical checksums for the same input.
+**Process:** a feature-branch workflow (`feature/<name>` → PR → review → `main`), conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`), and a green `dotnet build` + `dotnet test` required before merge.
 
-**PowerShell** backs the helper scripts in [scripts/](scripts/): `send-measurements.ps1` (a live demo that sends a mix of valid and invalid requests) and `generate-jmeter-csv.ps1` (builds the JMeter CSV, computing the HMAC with the same logic as the real client, encoded as UTF-8 without a BOM, which JMeter requires).
+## Authors & License
+
+Built by [Jakub Bąk](https://github.com/jakubbak-online) and Martyna Wawak.
+
+Licensed under the [MIT License](LICENSE).
