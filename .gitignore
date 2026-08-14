@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local dev / narzedzia
+.claude/
+
+# Lokalna konfiguracja z prawdziwymi sekretami (nigdy nie commitowac)
+.env
+**/appsettings.Development.json
+
+# Zalaczniki do oddania (lokalne kopie konfiguracji + payloady)
+DoWyslania/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
