@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8" />
+    <title>Telemetrus — Alerty w czasie rzeczywistym</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #14171c;
+            color: #d7dce3;
+        }
+        h1 {
+            color: #5b9dd9;
+            border-bottom: 2px solid #3a4048;
+            padding-bottom: 10px;
+        }
+        #status {
+            padding: 8px 16px;
+            border-radius: 4px;
+            display: inline-block;
+            margin-bottom: 16px;
+            font-weight: bold;
+        }
+        .connected { background: #6cbf84; color: #14171c; }
+        .disconnected { background: #e0667a; color: #14171c; }
+        .connecting { background: #e0c46c; color: #14171c; }
+
+        #alerts {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .alert {
+            padding: 16px;
+            border-radius: 8px;
+            border-left: 4px solid;
+            background: #232830;
+            animation: slideIn 0.3s ease-out;
+        }
+        .alert.crit { border-color: #e0667a; }
+        .alert.warn { border-color: #e0c46c; }
+        .alert.info { border-color: #5b9dd9; }
+        .alert.ok   { border-color: #6cbf84; }
+
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .alert-level {
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .alert-time { color: #8b93a1; }
+        .alert-message { font-size: 1.1em; }
+        .alert-raw {
+            margin-top: 8px;
+            padding: 8px;
+            background: #14171c;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            color: #8b93a1;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .empty {
+            padding: 40px;
+            text-align: center;
+            color: #5c6470;
+            border: 2px dashed #3a4048;
+            border-radius: 8px;
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        button {
+            background: #5b9dd9;
+            color: #14171c;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+        button:hover { background: #79b3e8; }
+    </style>
+</head>
+<body>
+    <h1>Telemetrus — Alerty telemetryczne</h1>
+
+    <div>
+        <span id="status" class="connecting">Łączę...</span>
+        <button onclick="clearAlerts()">Wyczyść</button>
+        <button onclick="sendTestAlert()">Testowy alert</button>
+    </div>
+
+    <h2>Strumień alertów:</h2>
+    <div id="alerts">
+        <div class="empty" id="empty">Brak alertów. Oczekiwanie na zdarzenia...</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <script>
+        const statusEl = document.getElementById('status');
+        const alertsEl = document.getElementById('alerts');
+        const emptyEl = document.getElementById('empty');
+
+        // Tworzymy połączenie SignalR z hubem /alertHub
+        const connection = new signalR.HubConnectionBuilder()
+            .withUrl('/alertHub')
+            .withAutomaticReconnect()
+            .build();
+
+        // Nasłuchujemy na zdarzenie "ReceiveAlert" wysyłane przez serwer
+        connection.on('ReceiveAlert', (alert) => {
+            console.log('Alert:', alert);
+            renderAlert(alert);
+        });
+
+        connection.onreconnecting(() => setStatus('connecting', 'Łączę ponownie...'));
+        connection.onreconnected(() => setStatus('connected', 'Połączony'));
+        connection.onclose(() => setStatus('disconnected', 'Rozłączony'));
+
+        connection.start()
+            .then(() => setStatus('connected', 'Połączony'))
+            .catch(err => {
+                setStatus('disconnected', 'Błąd połączenia');
+                console.error(err);
+            });
+
+        function setStatus(cls, text) {
+            statusEl.className = cls;
+            statusEl.textContent = text;
+        }
+
+        function renderAlert(alert) {
+            if (emptyEl) emptyEl.remove();
+
+            const level = (alert.level || 'info').toLowerCase();
+            const levelClass = level.startsWith('crit') ? 'crit' :
+                               level.startsWith('warn') ? 'warn' :
+                               level === 'ok' ? 'ok' : 'info';
+
+            const div = document.createElement('div');
+            div.className = `alert ${levelClass}`;
+            div.innerHTML = `
+                <div class="alert-header">
+                    <span class="alert-level">${escapeHtml(alert.level || 'info')}</span>
+                    <span class="alert-time">${new Date(alert.timestamp).toLocaleString('pl-PL')}</span>
+                </div>
+                <div class="alert-message">${escapeHtml(alert.message || '(brak wiadomości)')}</div>
+                ${alert.raw ? `<div class="alert-raw">${escapeHtml(alert.raw)}</div>` : ''}
+            `;
+            alertsEl.insertBefore(div, alertsEl.firstChild);
+        }
+
+        function escapeHtml(str) {
+            return String(str ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        function clearAlerts() {
+            alertsEl.innerHTML = '<div class="empty" id="empty">Brak alertów. Oczekiwanie na zdarzenia...</div>';
+        }
+
+        function sendTestAlert() {
+            fetch('/webhook/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    level: 'warn',
+                    message: 'Testowy alert z przycisku UI — ' + new Date().toLocaleTimeString('pl-PL')
+                })
+            }).catch(err => console.error(err));
+        }
+    </script>
+</body>
+</html>
