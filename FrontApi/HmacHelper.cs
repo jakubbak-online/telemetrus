@@ -9,9 +9,8 @@ namespace FrontApi;
 // Worker używa tego samego klucza i tej samej metody, żeby sprawdzić czy dane są nienaruszone.
 public static class HmacHelper
 {
-    // UWAGA: w prawdziwej aplikacji klucz powinien być w appsettings.json lub zmiennej środowiskowej,
-    // nie hardkodowany w kodzie. Na potrzeby projektu laboratoryjnego jest tu dla prostoty.
-    public const string SecretKey = "telemetrus-demo-shared-secret";
+    // Wartość fallback — docelowy klucz powinien być ustawiony w appsettings.json pod Hmac:SecretKey
+    public const string FallbackKey = "telemetrus-demo-shared-secret";
 
     public static string Compute(byte[] data, string secret)
     {

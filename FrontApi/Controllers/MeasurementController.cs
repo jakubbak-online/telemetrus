@@ -1,5 +1,4 @@
 using Microsoft.AspNetCore.Mvc;
-using RabbitMQ.Client;
 using System.Text;
 using System.Text.Json;
 
@@ -12,27 +11,40 @@ public class MeasurementController : ControllerBase
     private readonly RabbitMqPublisher _publisher;
     private readonly ILogger<MeasurementController> _logger;
 
-    // Wstrzykujemy RabbitMqPublisher i logger przez konstruktor (dependency injection)
     public MeasurementController(RabbitMqPublisher publisher, ILogger<MeasurementController> logger)
     {
         _publisher = publisher;
         _logger = logger;
     }
 
-    // Ten endpoint odpowiada na POST http://localhost:5000/measurement
+    // POST http://localhost:5000/measurement
+    // Klient przysyła:
+    //   payload  — dane pomiarowe zakodowane w Base64 (JSON: {"deviceId":"...", "value":...})
+    //   checksum — HMAC-SHA256 obliczony przez klienta z dekodowanego JSON + tajny klucz
+    //   channel  — (opcjonalne) nazwa kanału RabbitMQ, np. "temperature", "sensors" (domyślnie: "default")
     [HttpPost]
     public IActionResult Post([FromBody] MeasurementRequest request)
     {
-        // Walidacja — sprawdzamy czy pole payload w ogóle przyszło
         if (string.IsNullOrWhiteSpace(request.Payload))
         {
-            _logger.LogWarning("Otrzymano żądanie bez pola payload.");
+            _logger.LogWarning("Odrzucono żądanie — brak pola 'payload'.");
             return BadRequest(new { error = "Pole 'payload' jest wymagane." });
         }
 
-        // Dekodowanie Base64
-        // Base64 to sposób zapisu binarnych danych jako tekst.
-        // np. "eyJkZXZpY2VJZCI6InNlbnNvcjEifQ==" → {"deviceId":"sensor1"}
+        if (string.IsNullOrWhiteSpace(request.Checksum))
+        {
+            _logger.LogWarning("Odrzucono żądanie — brak pola 'checksum'.");
+            return BadRequest(new { error = "Pole 'checksum' jest wymagane." });
+        }
+
+        string channel = string.IsNullOrWhiteSpace(request.Channel) ? "default" : request.Channel.Trim().ToLower();
+
+        if (!channel.All(c => char.IsLetterOrDigit(c) || c == '-' || c == '_'))
+        {
+            _logger.LogWarning("Odrzucono żądanie — niepoprawna nazwa kanału: {Channel}", channel);
+            return BadRequest(new { error = "Pole 'channel' może zawierać tylko litery, cyfry, myślniki i podkreślenia." });
+        }
+
         byte[] decodedBytes;
         try
         {
@@ -40,56 +52,79 @@ public class MeasurementController : ControllerBase
         }
         catch (FormatException)
         {
-            _logger.LogWarning("Nie udało się zdekodować Base64: {Payload}", request.Payload);
+            _logger.LogWarning("Odrzucono żądanie — niepoprawny Base64.");
             return BadRequest(new { error = "Pole 'payload' nie jest poprawnym Base64." });
         }
 
-        // Zamieniamy bajty z powrotem na string (UTF-8 bez BOM)
-        // Używamy GetString z offsetem żeby pominąć ewentualny BOM na początku
-        string decodedJson = new UTF8Encoding(false).GetString(decodedBytes).Trim().TrimStart('\uFEFF');
-        _logger.LogInformation("Zdekodowany payload: {Json}", decodedJson);
+        string decodedJson = Encoding.UTF8.GetString(decodedBytes);
 
-        // Obliczamy HMAC checksum i dołączamy do wiadomości razem z danymi
-        // Dzięki temu Worker może sprawdzić czy dane nie zostały zmienione po drodze
-        string hmac = HmacHelper.Compute(decodedBytes, HmacHelper.SecretKey);
+        // Sprawdzamy strukturę PRZED wysłaniem do kolejki, żeby błędne dane nie trafiały do Workera
+        try
+        {
+            using var doc = JsonDocument.Parse(decodedJson);
+            var root = doc.RootElement;
 
-        // Tworzymy wiadomość, którą wyślemy do RabbitMQ
-        // Owijamy dane + checksum w jeden obiekt JSON
+            if (!root.TryGetProperty("deviceId", out var deviceIdEl) || string.IsNullOrWhiteSpace(deviceIdEl.GetString()))
+            {
+                _logger.LogWarning("Odrzucono żądanie — brak lub puste pole 'deviceId' w payload.");
+                return BadRequest(new { error = "Payload musi zawierać niepuste pole 'deviceId'." });
+            }
+
+            if (!root.TryGetProperty("value", out var valueEl))
+            {
+                _logger.LogWarning("Odrzucono żądanie — brak pola 'value' w payload.");
+                return BadRequest(new { error = "Payload musi zawierać pole 'value'." });
+            }
+
+            if (valueEl.ValueKind != JsonValueKind.Number)
+            {
+                _logger.LogWarning("Odrzucono żądanie — pole 'value' nie jest liczbą (typ: {Kind}).", valueEl.ValueKind);
+                return BadRequest(new { error = "Pole 'value' w payload musi być liczbą." });
+            }
+        }
+        catch (JsonException)
+        {
+            _logger.LogWarning("Odrzucono żądanie — zdekodowany payload nie jest poprawnym JSON.");
+            return BadRequest(new { error = "Zdekodowany payload nie jest poprawnym JSON. Oczekiwano: {\"deviceId\":\"...\",\"value\":0.0}" });
+        }
+
+        _logger.LogInformation("Zdekodowany payload: {Json} | kanał: {Channel}", decodedJson, channel);
+
+        // Checksum weryfikuje Worker — API przekazuje go dalej bez weryfikacji (separation of concerns)
         var message = new QueueMessage
         {
             Data = decodedJson,
-            Checksum = hmac,
+            Checksum = request.Checksum,
             ReceivedAt = DateTime.UtcNow
         };
 
         string messageJson = JsonSerializer.Serialize(message);
 
-        // Wysyłamy wiadomość do kolejki RabbitMQ
         try
         {
-            _publisher.Publish(messageJson);
-            _logger.LogInformation("Wiadomość wysłana do kolejki. Checksum: {Checksum}", hmac);
+            _publisher.Publish(messageJson, channel);
+            _logger.LogInformation("Wiadomość wysłana do kanału '{Channel}'.", channel);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Błąd przy wysyłaniu do RabbitMQ.");
-            return StatusCode(500, new { error = "Błąd wewnętrzny — nie udało się wysłać do kolejki." });
+            return StatusCode(500, new { error = "Błąd wewnętrzny serwera." });
         }
 
-        return Ok(new { status = "ok", checksum = hmac });
+        return Ok(new { status = "ok", channel });
     }
 }
 
-// Model danych przychodzących z zewnątrz — mapuje się na JSON {"payload": "..."}
 public class MeasurementRequest
 {
-    public string Payload { get; set; } = string.Empty;
+    public string Payload { get; set; } = string.Empty;    // dane zakodowane w Base64
+    public string Checksum { get; set; } = string.Empty;   // HMAC-SHA256 obliczony przez klienta
+    public string? Channel { get; set; }                   // kanał RabbitMQ (opcjonalne, domyślnie "default")
 }
 
-// Model wiadomości wysyłanej do kolejki RabbitMQ
 public class QueueMessage
 {
-    public string Data { get; set; } = string.Empty;      // zdekodowany JSON
-    public string Checksum { get; set; } = string.Empty;  // HMAC — do weryfikacji przez Workera
-    public DateTime ReceivedAt { get; set; }               // kiedy API odebrało wiadomość
+    public string Data { get; set; } = string.Empty;
+    public string Checksum { get; set; } = string.Empty;
+    public DateTime ReceivedAt { get; set; }
 }

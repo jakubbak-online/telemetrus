@@ -3,18 +3,23 @@ using System.Text;
 
 namespace FrontApi;
 
-// RabbitMqPublisher to "serwis" — klasa odpowiedzialna wyłącznie za komunikację z RabbitMQ.
-// Trzymamy go osobno od kontrolera, żeby kontroler był prosty i czytelny.
+// RabbitMqPublisher obsługuje wiele kanałów publikacji.
+// Każdy kanał to osobna kolejka: measurements.{channel} z własną DLQ: measurements.{channel}.dlq
+// Kolejki są deklarowane leniwie — przy pierwszej publikacji do danego kanału.
 public class RabbitMqPublisher : IDisposable
 {
+    private const string QueuePrefix = "measurements";
+
     private readonly IConnection _connection;
     private readonly IModel _channel;
-    private const string QueueName = "measurements";
-    private const string DeadLetterQueueName = "measurements.dlq"; // kolejka dla błędnych wiadomości
+
+    // Śledzimy które kolejki zostały już zadeklarowane — QueueDeclare jest idempotentne,
+    // ale wywołanie go przy każdym żądaniu to zbędny narzut sieciowy.
+    private readonly HashSet<string> _declaredQueues = new();
+    private readonly object _declareLock = new();
 
     public RabbitMqPublisher(IConfiguration config)
     {
-        // Odczytujemy adres RabbitMQ z konfiguracji (appsettings.json)
         var factory = new ConnectionFactory
         {
             HostName = config["RabbitMQ:Host"] ?? "localhost",
@@ -25,52 +30,65 @@ public class RabbitMqPublisher : IDisposable
 
         _connection = factory.CreateConnection();
         _channel = _connection.CreateModel();
-
-        // Deklarujemy kolejkę DLQ (Dead Letter Queue) — dla błędnych wiadomości
-        // Jeśli Worker wyśle NACK, wiadomość trafi tutaj zamiast zniknąć
-        _channel.QueueDeclare(
-            queue: DeadLetterQueueName,
-            durable: true,      // przeżyje restart RabbitMQ
-            exclusive: false,
-            autoDelete: false,
-            arguments: null
-        );
-
-        // Deklarujemy kolejkę główną z argumentem x-dead-letter-exchange
-        // To mówi RabbitMQ: "gdy wiadomość zostanie odrzucona, wyślij ją do DLQ"
-        var args = new Dictionary<string, object>
-        {
-            { "x-dead-letter-exchange", "" },          // pusty string = domyślny exchange
-            { "x-dead-letter-routing-key", DeadLetterQueueName } // klucz routingu = nazwa DLQ
-        };
-
-        _channel.QueueDeclare(
-            queue: QueueName,
-            durable: true,      // kolejka przeżyje restart RabbitMQ
-            exclusive: false,   // może być używana przez wiele połączeń
-            autoDelete: false,  // nie usuwa się automatycznie gdy brak konsumentów
-            arguments: args     // tutaj podpinamy DLQ
-        );
     }
 
-    // Metoda, którą wywołuje kontroler żeby wysłać wiadomość
-    public void Publish(string messageJson)
+    // Publikuje wiadomość do kolejki dla podanego kanału.
+    // Jeśli kolejka jeszcze nie istnieje — tworzy ją wraz z DLQ.
+    public void Publish(string messageJson, string channelName = "default")
     {
-        var body = Encoding.UTF8.GetBytes(messageJson);
+        var queueName = $"{QueuePrefix}.{channelName}";
+        EnsureQueueDeclared(queueName);
 
-        // IBasicProperties to "koperta" — metadane wiadomości
+        var body = Encoding.UTF8.GetBytes(messageJson);
         var properties = _channel.CreateBasicProperties();
         properties.Persistent = true; // wiadomość przeżyje restart RabbitMQ
 
         _channel.BasicPublish(
-            exchange: "",           // pusty = domyślny exchange, routing przez nazwę kolejki
-            routingKey: QueueName,  // nazwa kolejki docelowej
+            exchange: "",
+            routingKey: queueName,
             basicProperties: properties,
             body: body
         );
     }
 
-    // Zwalniamy zasoby gdy aplikacja się kończy
+    // Deklaruje kolejkę główną i jej DLQ, jeśli jeszcze nie są zadeklarowane.
+    // Lock jest potrzebny bo Publisher jest singletonem — może być wywołany z wielu wątków.
+    private void EnsureQueueDeclared(string queueName)
+    {
+        lock (_declareLock)
+        {
+            if (_declaredQueues.Contains(queueName)) return;
+
+            var dlqName = $"{queueName}.dlq";
+
+            // DLQ musi być zadeklarowana PRZED kolejką główną
+            _channel.QueueDeclare(
+                queue: dlqName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null
+            );
+
+            // Kolejka główna kieruje odrzucone wiadomości (NACK) do DLQ
+            var args = new Dictionary<string, object>
+            {
+                { "x-dead-letter-exchange", "" },
+                { "x-dead-letter-routing-key", dlqName }
+            };
+
+            _channel.QueueDeclare(
+                queue: queueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: args
+            );
+
+            _declaredQueues.Add(queueName);
+        }
+    }
+
     public void Dispose()
     {
         _channel?.Close();
