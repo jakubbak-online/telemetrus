@@ -25,9 +25,11 @@ pwsh scripts/send-measurements.ps1
 2. **Create** → typ: **HTTP**
 3. Konfiguracja:
    - **Name:** `Telemetrus WebApp`
-   - **URL:** `http://host.docker.internal:5002/webhook/influx`
-     > Na Linuxie w Docker użyj: `http://172.17.0.1:5002/webhook/influx`
-     > Jeśli NotificationWebApp działa w tym samym kontenerze Docker: użyj nazwy serwisu
+   - **URL** zależy od trybu uruchomienia:
+     - **Cały stack w Dockerze** (`docker compose up -d --build`, tryb domyślny): `http://notificationwebapp:8080/webhook/influx`
+       (nazwa serwisu z docker-compose.yml + wewnętrzny port kontenera 8080 — InfluxDB i NotificationWebApp są w tej samej sieci Docker)
+     - **Tryb hybrydowy** (NotificationWebApp uruchomiony lokalnie przez `dotnet run`): `http://host.docker.internal:5002/webhook/influx`
+       > Na Linuxie w Docker użyj: `http://172.17.0.1:5002/webhook/influx`
    - **HTTP Method:** `POST`
    - **Auth Method:** None
 4. **Create Notification Endpoint**
@@ -65,7 +67,7 @@ pwsh scripts/send-measurements.ps1
 
 ## 6. Test całości
 
-1. Uruchom NotificationWebApp: `cd NotificationWebApp && dotnet run`
+1. Uruchom NotificationWebApp: `cd NotificationWebApp && dotnet run` (tylko w trybie hybrydowym — w pełnym Dockerze już działa dzięki `docker compose up -d --build`)
 2. Otwórz UI: http://localhost:5002
 3. Wygeneruj pomiar przekraczający próg:
    ```powershell
@@ -103,8 +105,12 @@ Można też skonfigurować alert przez API InfluxDB używając taska Flux — al
 ## Rozwiązywanie problemów
 
 **Webhook nie dochodzi do WebApp:**
-- Sprawdź adres URL: InfluxDB w Dockerze nie widzi `localhost` maszyny hosta — użyj `host.docker.internal`
+- Sprawdź adres URL zgodnie z trybem uruchomienia (patrz krok 3 wyżej):
+  - cały stack w Dockerze → `http://notificationwebapp:8080/webhook/influx` (nazwa serwisu zadziała tylko wewnątrz sieci Docker)
+  - tryb hybrydowy → InfluxDB w Dockerze nie widzi `localhost` maszyny hosta, użyj `http://host.docker.internal:5002/webhook/influx`
+  - adres z jednego trybu nie zadziała w drugim — to najczęstsza przyczyna błędu po przełączeniu się między trybami
 - Sprawdź logi InfluxDB: `docker logs telemetrus-influxdb`
+- Sprawdź logi NotificationWebApp: `docker logs telemetrus-notificationwebapp` (tryb Docker) lub konsolę `dotnet run` (tryb hybrydowy)
 - Sprawdź czy NotificationWebApp słucha na porcie 5002
 
 **Check się nie uruchamia:**

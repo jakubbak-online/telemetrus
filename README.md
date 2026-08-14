@@ -38,7 +38,7 @@ Built as a two-person team project to practice message-driven architecture end t
 - **Realtime alerting** — an InfluxDB threshold check fires a webhook that a SignalR hub broadcasts to every connected browser over WebSocket, no polling, no page refresh.
 - **Load-tested, not just demoed** — a JMeter plan drives 1000 concurrent requests (20 threads) through the full API → queue → worker → InfluxDB path; see [jmeter/README.md](jmeter/README.md) for the scenario and results.
 - **Unit-tested integrity logic** — xUnit tests pin down that FrontApi and TelemetryWorker compute identical HMAC checksums, the assumption the whole security model rests on.
-- **One-command local infra** — RabbitMQ and InfluxDB run via Docker Compose with healthchecks gating application startup.
+- **One-command full stack** — `docker compose up -d --build` runs the entire pipeline (RabbitMQ, InfluxDB, and all three .NET apps) with healthchecks gating startup order, or start just the infra and run the apps locally for hot-reload debugging.
 
 ## Architecture
 
@@ -66,7 +66,7 @@ A full step-by-step walkthrough of every component in this diagram is in [Compon
 | **InfluxDB 2.x** | Time-series storage for readings, plus its built-in Checks + Notification Rules alerting engine |
 | **SignalR** | Realtime server → browser push (WebSocket, with SSE/long-polling fallback) |
 | **HMAC-SHA256** | Message integrity & authenticity between client, API, and worker |
-| **Docker Compose** | Local RabbitMQ + InfluxDB infrastructure with healthchecks |
+| **Docker Compose** | Full application stack (RabbitMQ, InfluxDB, and all three .NET apps) with healthchecks and service dependencies — or just the infra, for local hot-reload dev |
 | **Apache JMeter** | Load-testing the full pipeline under concurrent traffic |
 | **xUnit** | Unit tests for the shared HMAC logic |
 | **PowerShell** | Demo and test-data generation scripts |
@@ -77,15 +77,14 @@ A full step-by-step walkthrough of every component in this diagram is in [Compon
 
 ```
 telemetrus/
-├── FrontApi/              REST API — validates & publishes measurements        (port 5000)
-├── TelemetryWorker/       BackgroundService — HMAC check, DLQ routing, InfluxDB writes
-├── NotificationWebApp/    Webhook receiver + SignalR hub + live alerts UI      (port 5002)
+├── FrontApi/              REST API — validates & publishes measurements        (port 5000, Dockerfile included)
+├── TelemetryWorker/       BackgroundService — HMAC check, DLQ routing, InfluxDB writes  (Dockerfile included)
+├── NotificationWebApp/    Webhook receiver + SignalR hub + live alerts UI      (port 5002, Dockerfile included)
 ├── Tests/                 xUnit tests for HMAC correctness across services
 ├── jmeter/                JMeter load-test plan, generated test data, results
 ├── scripts/                PowerShell demo & test-data generation scripts
 ├── docs/                  Setup guides (InfluxDB alert configuration)
-├── docker-compose.yml     RabbitMQ + InfluxDB infrastructure
-├── dokumentacja.md        Extended project write-up (Polish, academic report)
+├── docker-compose.yml     Full stack: RabbitMQ, InfluxDB, and all three .NET apps
 ├── README.md / README.pl.md
 └── LICENSE                MIT
 ```
@@ -95,23 +94,35 @@ telemetrus/
 The repository ships no real secrets. Before running it for the first time:
 
 1. Copy `.env.example` to `.env` and fill in your own InfluxDB token (for example, generate one with `openssl rand -base64 64`).
-2. Create `TelemetryWorker/appsettings.Development.json` with the same token value:
+2. **Only if you run TelemetryWorker locally via `dotnet run`** (Option B below) — create `TelemetryWorker/appsettings.Development.json` with the same token value:
    ```json
    {
      "InfluxDB": { "Token": "<same value as in .env>" }
    }
    ```
-   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment.
+   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment. Running the full stack via Docker Compose (Option A) injects the same `.env` token automatically — nothing to paste there.
 3. `Hmac:SecretKey` in `FrontApi/appsettings.json` and `TelemetryWorker/appsettings.json` is a shared demo value (`telemetrus-demo-shared-secret`) used locally by both services and by the scripts in `scripts/`. It doesn't protect any real data, so it's fine to leave as-is for demo purposes — in a real deployment it would belong in a secrets manager instead.
 
 ## Getting Started
 
-**Requirements:** .NET SDK 8.0 · Docker + Docker Compose · PowerShell 7+ (demo scripts) · Apache JMeter 5.6+ (load test)
+**Requirements:** Docker + Docker Compose (Option A) · additionally .NET SDK 8.0 for Option B · PowerShell 7+ (demo scripts) · Apache JMeter 5.6+ (load test)
+
+Don't run Option A and Option B for the same app at the same time — both bind the same host ports (5000/5002), so the second one to start will fail.
+
+### Option A — everything in Docker (fastest way to try it)
+
+```bash
+docker compose up -d --build
+```
+
+This builds and starts all five services — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker, and NotificationWebApp — with healthchecks gating startup order. No `dotnet run` needed. Skip straight to step 3 below.
+
+### Option B — hybrid (infra in Docker, apps local — best for debugging/hot-reload)
 
 **1. Start the infrastructure**
 
 ```bash
-docker compose up -d
+docker compose up -d rabbitmq influxdb
 ```
 
 - RabbitMQ management UI: [http://localhost:15672](http://localhost:15672) (`guest` / `guest`)
@@ -124,6 +135,8 @@ cd FrontApi && dotnet run             # accepts measurements, port 5000
 cd TelemetryWorker && dotnet run      # consumes the queue, writes to InfluxDB
 cd NotificationWebApp && dotnet run   # webhook + SignalR + UI, port 5002
 ```
+
+### Both options continue here
 
 **3. Open the alerts UI** — [http://localhost:5002](http://localhost:5002). The status indicator should switch to "Connected" (SignalR).
 
@@ -145,7 +158,7 @@ This sends a batch of requests — valid ones, plus a few with a deliberately wr
 Following [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md):
 
 1. In InfluxDB, create a **Threshold Check** on `sensor_reading.value` (e.g. `> 80`).
-2. Add an **HTTP Notification Endpoint** pointing at `http://host.docker.internal:5002/webhook/influx`.
+2. Add an **HTTP Notification Endpoint** — the URL depends on how you started the stack (Docker service name vs. `host.docker.internal`); the doc above covers both.
 3. Add a **Notification Rule** connecting the check to the endpoint.
 
 Then send a measurement that crosses the threshold:
@@ -299,7 +312,11 @@ A SignalR client holding an open WebSocket connection. Every new alert from Infl
 
 **SignalR UI shows "Rozłączony" (Disconnected).** NotificationWebApp isn't running, or port 5002 is already in use.
 
-**Webhook from InfluxDB never arrives.** The InfluxDB container can't resolve `localhost` as the host machine, use `http://host.docker.internal:5002/webhook/influx` instead.
+**Webhook from InfluxDB never arrives.** Check the Notification Endpoint URL against how you started the stack — full Docker mode needs the service name (`http://notificationwebapp:8080/webhook/influx`), hybrid mode needs `http://host.docker.internal:5002/webhook/influx` (InfluxDB's container can't resolve `localhost` as the host machine). A URL from one mode won't resolve in the other; see [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md) for details.
+
+**`telemetryworker` container keeps restarting.** Check `docker compose logs telemetryworker` — it fails fast (by design) if `InfluxDB:Token` is empty. Make sure `.env` exists (copied from `.env.example`) with `INFLUXDB_ADMIN_TOKEN` set before running `docker compose up -d --build`.
+
+**Port already in use / container fails to bind 5000 or 5002.** You're probably running both Option A (Docker) and Option B (`dotnet run`) for the same app at once. Stop one before starting the other, e.g. `docker compose stop frontapi`.
 
 </details>
 

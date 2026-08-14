@@ -1,12 +1,18 @@
-# docker-compose.yml — uruchamia infrastrukturę potrzebną do projektu Telemetrus
-# Użycie: docker compose up -d
+# docker-compose.yml — uruchamia cały stack Telemetrus
+#
+# Użycie:
+#   docker compose up -d --build              -> cały stack: RabbitMQ, InfluxDB i wszystkie 3 aplikacje .NET
+#   docker compose up -d rabbitmq influxdb     -> tylko infrastruktura; aplikacje .NET uruchamiasz wtedy
+#                                                  lokalnie przez `dotnet run` (wygodniejszy debug/hot-reload)
 #
 # Uruchamia:
 #   - RabbitMQ (broker kolejek) z panelem management na http://localhost:15672 (guest/guest)
 #   - InfluxDB (baza czasowa) na http://localhost:8086 (login: admin, hasło: admin12345)
+#   - FrontApi (REST API) na http://localhost:5000
+#   - TelemetryWorker (worker w tle — brak wystawionego portu, konsumuje RabbitMQ, pisze do InfluxDB)
+#   - NotificationWebApp (webhook + SignalR + UI alertów) na http://localhost:5002
 #
-# Aplikacje .NET (FrontApi, TelemetryWorker, NotificationWebApp) uruchamiamy LOKALNIE przez `dotnet run`
-# — wtedy łatwiej debugować i widać logi.
+# Wymaga pliku .env z INFLUXDB_ADMIN_TOKEN — patrz .env.example.
 
 services:
   rabbitmq:
@@ -38,7 +44,9 @@ services:
       DOCKER_INFLUXDB_INIT_ORG: myorg
       DOCKER_INFLUXDB_INIT_BUCKET: telemetry
       # Token admina jest czytany z pliku .env (skopiuj .env.example -> .env i wygeneruj własną wartość).
-      # Tę samą wartość wpisz potem do TelemetryWorker/appsettings.Development.json pod InfluxDB:Token.
+      # Ta sama wartość jest automatycznie przekazywana do telemetryworker (InfluxDB__Token) poniżej.
+      # Ręczne wklejanie do TelemetryWorker/appsettings.Development.json potrzebne jest tylko w trybie
+      # hybrydowym (gdy TelemetryWorker uruchamiasz lokalnie przez `dotnet run`, nie w Dockerze).
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
     volumes:
       - influxdb_data:/var/lib/influxdb2
@@ -48,6 +56,56 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  frontapi:
+    build:
+      context: ./FrontApi
+    container_name: telemetrus-frontapi
+    ports:
+      - "5000:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Port: "5672"
+      RabbitMQ__Username: guest
+      RabbitMQ__Password: guest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  telemetryworker:
+    build:
+      context: ./TelemetryWorker
+    container_name: telemetrus-telemetryworker
+    environment:
+      # Generic host (Host.CreateApplicationBuilder), NIE ASPNETCORE_ENVIRONMENT — ta zmienna nie
+      # zadziałałaby tutaj, bo TelemetryWorker nie ma WebApplicationBuilder/Kestrela.
+      DOTNET_ENVIRONMENT: Development
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Port: "5672"
+      RabbitMQ__Username: guest
+      RabbitMQ__Password: guest
+      InfluxDB__Url: http://influxdb:8086
+      InfluxDB__Token: ${INFLUXDB_ADMIN_TOKEN}
+      InfluxDB__Org: myorg
+      InfluxDB__Bucket: telemetry
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    restart: unless-stopped
+
+  notificationwebapp:
+    build:
+      context: ./NotificationWebApp
+    container_name: telemetrus-notificationwebapp
+    ports:
+      - "5002:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+    restart: unless-stopped
 
 volumes:
   rabbitmq_data:
