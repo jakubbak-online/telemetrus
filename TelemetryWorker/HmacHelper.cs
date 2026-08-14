@@ -8,8 +8,8 @@ namespace TelemetryWorker;
 // Jeśli się zgadzają — dane są nienaruszone. Jeśli nie — coś po drodze poszło nie tak.
 public static class HmacHelper
 {
-    // MUSI być identyczny jak w FrontApi/HmacHelper.cs !
-    public const string SecretKey = "telemetrus-demo-shared-secret";
+    // Wartość fallback gdy brak klucza w konfiguracji — preferuj ustawienie Hmac:SecretKey w appsettings.json
+    public const string FallbackKey = "telemetrus-demo-shared-secret";
 
     public static string Compute(string data, string secret)
     {
