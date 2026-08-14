@@ -1,0 +1,55 @@
+# docker-compose.yml — uruchamia infrastrukturę potrzebną do projektu Telemetrus
+# Użycie: docker compose up -d
+#
+# Uruchamia:
+#   - RabbitMQ (broker kolejek) z panelem management na http://localhost:15672 (guest/guest)
+#   - InfluxDB (baza czasowa) na http://localhost:8086 (login: admin, hasło: admin12345)
+#
+# Aplikacje .NET (FrontApi, TelemetryWorker, NotificationWebApp) uruchamiamy LOKALNIE przez `dotnet run`
+# — wtedy łatwiej debugować i widać logi.
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: telemetrus-rabbitmq
+    ports:
+      - "5672:5672"     # port AMQP (dla aplikacji)
+      - "15672:15672"   # port panelu webowego (dla człowieka)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: telemetrus-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin12345
+      DOCKER_INFLUXDB_INIT_ORG: myorg
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      # Token admina jest czytany z pliku .env (skopiuj .env.example -> .env i wygeneruj własną wartość).
+      # Tę samą wartość wpisz potem do TelemetryWorker/appsettings.Development.json pod InfluxDB:Token.
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  rabbitmq_data:
+  influxdb_data:
+  influxdb_config:
