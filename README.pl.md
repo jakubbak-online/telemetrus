@@ -91,16 +91,16 @@ telemetrus/
 
 ## Konfiguracja lokalna
 
-Repozytorium nie zawiera prawdziwych sekretów. Przed pierwszym uruchomieniem:
+Repozytorium nie zawiera prawdziwych sekretów, ale ma działające wartości domyślne do demo, więc **Opcja A nie wymaga żadnej konfiguracji** — `docker compose up -d --build` działa od razu po sklonowaniu.
 
-1. Skopiuj `.env.example` do `.env` i wpisz własny token InfluxDB (np. wygenerowany przez `openssl rand -base64 64`).
-2. **Tylko jeśli uruchamiasz TelemetryWorker lokalnie przez `dotnet run`** (Opcja B poniżej) — utwórz `TelemetryWorker/appsettings.Development.json` z tą samą wartością tokena:
+1. `INFLUXDB_ADMIN_TOKEN` spada do wbudowanej wartości demo (`telemetrus-demo-influxdb-admin-token`) zaszytej w `docker-compose.yml`, gdy nie ma pliku `.env`. To wystarcza, żeby wypróbować projekt. Jeśli chcesz użyć własnego tokena (np. żeby wykorzystać tę instancję InfluxDB gdzie indziej), skopiuj `.env.example` do `.env` i wpisz własną wartość — np. wygenerowaną przez `openssl rand -base64 64`. Plik `.env`, jeśli istnieje, zawsze nadpisuje wartość domyślną.
+2. **Tylko jeśli uruchamiasz TelemetryWorker lokalnie przez `dotnet run`** (Opcja B poniżej) — utwórz `TelemetryWorker/appsettings.Development.json` z wartością tokena (tą samą co w `.env`, jeśli go utworzyłeś; w przeciwnym razie zadziała też domyślna wartość demo powyżej, o ile zgadza się z tym, czym InfluxDB został zainicjowany):
    ```json
    {
-     "InfluxDB": { "Token": "<ta sama wartość co w .env>" }
+     "InfluxDB": { "Token": "<token — patrz wyżej>" }
    }
    ```
-   Ten plik jest w `.gitignore` — ASP.NET Core wczytuje go automatycznie obok `appsettings.json` w środowisku Development. Uruchomienie całego stacku przez Docker Compose (Opcja A) wstrzykuje ten sam token z `.env` automatycznie — nie trzeba nic wklejać.
+   Ten plik jest w `.gitignore` — ASP.NET Core wczytuje go automatycznie obok `appsettings.json` w środowisku Development. Uruchomienie całego stacku przez Docker Compose (Opcja A) wstrzykuje token automatycznie — nie trzeba nic wklejać.
 3. `Hmac:SecretKey` w `FrontApi/appsettings.json` i `TelemetryWorker/appsettings.json` to wspólna wartość demonstracyjna (`telemetrus-demo-shared-secret`) używana lokalnie przez oba serwisy i skrypty w `scripts/` — nie chroni realnych danych, więc może zostać taka, jaka jest, do celów demo. W realnym wdrożeniu powinna trafić do menedżera sekretów.
 
 ## Uruchomienie
@@ -115,7 +115,7 @@ Nie uruchamiaj Opcji A i Opcji B dla tej samej aplikacji jednocześnie — obie 
 docker compose up -d --build
 ```
 
-To buduje i uruchamia wszystkie pięć serwisów — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker i NotificationWebApp — z healthchecks warunkującymi kolejność startu. Żaden `dotnet run` nie jest potrzebny. Przejdź od razu do kroku 3 poniżej.
+To buduje i uruchamia wszystkie pięć serwisów — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker i NotificationWebApp — z healthchecks warunkującymi kolejność startu. Żaden `dotnet run` nie jest potrzebny, plik `.env` też nie (patrz [Konfiguracja lokalna](#konfiguracja-lokalna)). Przejdź od razu do kroku 3 poniżej.
 
 ### Opcja B — hybrydowa (infra w Dockerze, aplikacje lokalnie — najlepsza do debugowania/hot-reload)
 
@@ -331,7 +331,9 @@ Klient SignalR utrzymujący otwarte połączenie WebSocket. Każdy nowy alert z 
 
 **Webhook z InfluxDB nie dociera.** Sprawdź URL Notification Endpoint względem trybu uruchomienia — pełny Docker wymaga nazwy serwisu (`http://notificationwebapp:8080/webhook/influx`), tryb hybrydowy wymaga `http://host.docker.internal:5002/webhook/influx` (kontener InfluxDB nie widzi `localhost` maszyny hosta). URL z jednego trybu nie zadziała w drugim; szczegóły w [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md).
 
-**Kontener `telemetryworker` ciągle się restartuje.** Sprawdź `docker compose logs telemetryworker` — celowo pada od razu, gdy `InfluxDB:Token` jest puste. Upewnij się, że istnieje `.env` (skopiowany z `.env.example`) z ustawionym `INFLUXDB_ADMIN_TOKEN`, zanim uruchomisz `docker compose up -d --build`.
+**Kontener `telemetryworker` ciągle się restartuje.** Sprawdź `docker compose logs telemetryworker` — celowo pada od razu, gdy `InfluxDB:Token` jest puste. Pod Docker Compose nie powinno się to zdarzyć nawet bez pliku `.env` (włącza się wbudowany token demo — patrz [Konfiguracja lokalna](#konfiguracja-lokalna)); dotyczy to głównie trybu hybrydowego (Opcja B), jeśli `TelemetryWorker/appsettings.Development.json` nie ma pasującego tokena, albo gdy wolumin danych InfluxDB został zainicjowany innym tokenem niż ten, którego teraz używasz (`docker compose down -v`, żeby zresetować).
+
+**Budowanie obrazu `frontapi` / `telemetryworker` / `notificationwebapp` pada błędem `NETSDK1064: Package ... was not found`.** Oznacza to, że lokalne, przestarzałe artefakty `bin/`/`obj/` zostały skopiowane do obrazu i nadpisały świeży restore NuGet wykonany w kontenerze. Każdy katalog serwisu ma własny plik `.dockerignore`, który temu zapobiega (Docker honoruje `.dockerignore` tylko w katalogu głównym kontekstu builda, a kontekst każdego serwisu to jego własny podkatalog — `.dockerignore` z katalogu głównego repo tu nie działa). Jeśli mimo to się to zdarzy, usuń lokalne foldery `bin/`/`obj/` dla tego serwisu i przebuduj przez `docker compose build --no-cache <service>`.
 
 **Port zajęty / kontener nie może się zbindować do 5000 albo 5002.** Prawdopodobnie masz jednocześnie uruchomioną Opcję A (Docker) i Opcję B (`dotnet run`) dla tej samej aplikacji. Zatrzymaj jedną, zanim uruchomisz drugą, np. `docker compose stop frontapi`.
 

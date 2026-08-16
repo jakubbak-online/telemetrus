@@ -91,16 +91,16 @@ telemetrus/
 
 ## Local Configuration
 
-The repository ships no real secrets. Before running it for the first time:
+The repository ships no real secrets, but it does ship working demo defaults, so **Option A needs no setup at all** — `docker compose up -d --build` works straight after cloning.
 
-1. Copy `.env.example` to `.env` and fill in your own InfluxDB token (for example, generate one with `openssl rand -base64 64`).
-2. **Only if you run TelemetryWorker locally via `dotnet run`** (Option B below) — create `TelemetryWorker/appsettings.Development.json` with the same token value:
+1. `INFLUXDB_ADMIN_TOKEN` falls back to a built-in demo value (`telemetrus-demo-influxdb-admin-token`) baked into `docker-compose.yml` when no `.env` file is present. That's fine for trying the project out. To use your own token instead (e.g. if you want to reuse this InfluxDB instance for something else), copy `.env.example` to `.env` and fill in a value — for example, generate one with `openssl rand -base64 64`. A `.env` file always overrides the built-in default.
+2. **Only if you run TelemetryWorker locally via `dotnet run`** (Option B below) — create `TelemetryWorker/appsettings.Development.json` with a token value (the same one as in `.env`, if you created one; otherwise the demo default above works too, as long as it matches what InfluxDB was initialized with):
    ```json
    {
-     "InfluxDB": { "Token": "<same value as in .env>" }
+     "InfluxDB": { "Token": "<token — see above>" }
    }
    ```
-   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment. Running the full stack via Docker Compose (Option A) injects the same `.env` token automatically — nothing to paste there.
+   This file is gitignored; ASP.NET Core loads it automatically alongside `appsettings.json` in the Development environment. Running the full stack via Docker Compose (Option A) injects the token automatically — nothing to paste there.
 3. `Hmac:SecretKey` in `FrontApi/appsettings.json` and `TelemetryWorker/appsettings.json` is a shared demo value (`telemetrus-demo-shared-secret`) used locally by both services and by the scripts in `scripts/`. It doesn't protect any real data, so it's fine to leave as-is for demo purposes — in a real deployment it would belong in a secrets manager instead.
 
 ## Getting Started
@@ -115,7 +115,7 @@ Don't run Option A and Option B for the same app at the same time — both bind 
 docker compose up -d --build
 ```
 
-This builds and starts all five services — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker, and NotificationWebApp — with healthchecks gating startup order. No `dotnet run` needed. Skip straight to step 3 below.
+This builds and starts all five services — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker, and NotificationWebApp — with healthchecks gating startup order. No `dotnet run` needed, and no `.env` file needed either (see [Local Configuration](#local-configuration)). Skip straight to step 3 below.
 
 ### Option B — hybrid (infra in Docker, apps local — best for debugging/hot-reload)
 
@@ -314,7 +314,9 @@ A SignalR client holding an open WebSocket connection. Every new alert from Infl
 
 **Webhook from InfluxDB never arrives.** Check the Notification Endpoint URL against how you started the stack — full Docker mode needs the service name (`http://notificationwebapp:8080/webhook/influx`), hybrid mode needs `http://host.docker.internal:5002/webhook/influx` (InfluxDB's container can't resolve `localhost` as the host machine). A URL from one mode won't resolve in the other; see [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md) for details.
 
-**`telemetryworker` container keeps restarting.** Check `docker compose logs telemetryworker` — it fails fast (by design) if `InfluxDB:Token` is empty. Make sure `.env` exists (copied from `.env.example`) with `INFLUXDB_ADMIN_TOKEN` set before running `docker compose up -d --build`.
+**`telemetryworker` container keeps restarting.** Check `docker compose logs telemetryworker` — it fails fast (by design) if `InfluxDB:Token` is empty. Under Docker Compose this shouldn't happen even without a `.env` file (the built-in demo token kicks in — see [Local Configuration](#local-configuration)); this mainly bites hybrid mode (Option B) if `TelemetryWorker/appsettings.Development.json` doesn't have a matching token, or if InfluxDB's data volume was initialized with a different token than what you're now passing in (`docker compose down -v` to reset it).
+
+**`frontapi` / `telemetryworker` / `notificationwebapp` image fails to build with a `NETSDK1064: Package ... was not found` error.** This means stale local `bin/`/`obj/` build artifacts got copied into the image and clobbered the container's own NuGet restore. Each service directory has its own `.dockerignore` to prevent this (Docker only honors a `.dockerignore` at the root of the build context, and each service's context is its own subfolder — the repo-root `.dockerignore` doesn't apply here). If you hit this anyway, delete the local `bin/`/`obj/` folders for that service and rebuild with `docker compose build --no-cache <service>`.
 
 **Port already in use / container fails to bind 5000 or 5002.** You're probably running both Option A (Docker) and Option B (`dotnet run`) for the same app at once. Stop one before starting the other, e.g. `docker compose stop frontapi`.
 

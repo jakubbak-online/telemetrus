@@ -12,7 +12,10 @@
 #   - TelemetryWorker (worker w tle — brak wystawionego portu, konsumuje RabbitMQ, pisze do InfluxDB)
 #   - NotificationWebApp (webhook + SignalR + UI alertów) na http://localhost:5002
 #
-# Wymaga pliku .env z INFLUXDB_ADMIN_TOKEN — patrz .env.example.
+# Działa "out of the box" bez żadnej konfiguracji: jeśli nie ma pliku .env,
+# INFLUXDB_ADMIN_TOKEN spada do wbudowanej wartości domyślnej (patrz niżej).
+# Chcesz własny token (np. do współdzielenia InfluxDB poza tym stackiem)?
+# Skopiuj .env.example -> .env i wpisz tam swoją wartość — .env nadpisze domyślną.
 
 services:
   rabbitmq:
@@ -43,11 +46,13 @@ services:
       DOCKER_INFLUXDB_INIT_PASSWORD: admin12345
       DOCKER_INFLUXDB_INIT_ORG: myorg
       DOCKER_INFLUXDB_INIT_BUCKET: telemetry
-      # Token admina jest czytany z pliku .env (skopiuj .env.example -> .env i wygeneruj własną wartość).
-      # Ta sama wartość jest automatycznie przekazywana do telemetryworker (InfluxDB__Token) poniżej.
-      # Ręczne wklejanie do TelemetryWorker/appsettings.Development.json potrzebne jest tylko w trybie
-      # hybrydowym (gdy TelemetryWorker uruchamiasz lokalnie przez `dotnet run`, nie w Dockerze).
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN}
+      # Token admina: bierze wartość z .env, jeśli plik istnieje, inaczej używa domyślnej
+      # wartości demo poniżej — dzięki temu `docker compose up` działa od razu po sklonowaniu
+      # repo, bez żadnej ręcznej konfiguracji. Ta sama wartość jest automatycznie przekazywana
+      # do telemetryworker (InfluxDB__Token) poniżej. Ręczne wklejanie do
+      # TelemetryWorker/appsettings.Development.json potrzebne jest tylko w trybie hybrydowym
+      # (gdy TelemetryWorker uruchamiasz lokalnie przez `dotnet run`, nie w Dockerze).
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-telemetrus-demo-influxdb-admin-token}
     volumes:
       - influxdb_data:/var/lib/influxdb2
       - influxdb_config:/etc/influxdb2
@@ -87,7 +92,7 @@ services:
       RabbitMQ__Username: guest
       RabbitMQ__Password: guest
       InfluxDB__Url: http://influxdb:8086
-      InfluxDB__Token: ${INFLUXDB_ADMIN_TOKEN}
+      InfluxDB__Token: ${INFLUXDB_ADMIN_TOKEN:-telemetrus-demo-influxdb-admin-token}
       InfluxDB__Org: myorg
       InfluxDB__Bucket: telemetry
     depends_on:
