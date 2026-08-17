@@ -1,3 +1,4 @@
+using NotificationWebApp;
 using NotificationWebApp.Hubs;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -5,7 +6,13 @@ var builder = WebApplication.CreateBuilder(args);
 // Rejestrujemy SignalR — obsługuje komunikację real-time z klientami przez WebSockets
 builder.Services.AddSignalR();
 
-// Kontrolery potrzebne do odbioru webhooków z InfluxDB
+// HttpClientFactory — używany przez DemoController i BurstService do przekazywania pomiarów do FrontApi
+builder.Services.AddHttpClient();
+
+// BurstService jako singleton — trzyma stan JEDNEGO aktywnego testu obciążeniowego naraz
+builder.Services.AddSingleton<BurstService>();
+
+// Kontrolery potrzebne do odbioru webhooków z InfluxDB, DemoController i BurstController
 builder.Services.AddControllers();
 
 // Swagger do testowania webhook endpointa

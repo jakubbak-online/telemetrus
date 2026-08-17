@@ -19,8 +19,13 @@ public class InfluxWriter : IDisposable
         _logger = logger;
 
         var url = config["InfluxDB:Url"] ?? "http://localhost:8086";
-        var token = config["InfluxDB:Token"]
-            ?? throw new InvalidOperationException("Brak tokena InfluxDB w konfiguracji (InfluxDB:Token)!");
+        var token = config["InfluxDB:Token"];
+
+        // "??" łapie tylko null — appsettings.json domyślnie ma Token: "" (pusty string, nie null),
+        // więc bez tej jawnej kontroli pusty token przechodziłby dalej i wybuchał mniej czytelnym
+        // ArgumentException dopiero wewnątrz konstruktora InfluxDBClient.
+        if (string.IsNullOrWhiteSpace(token))
+            throw new InvalidOperationException("Brak tokena InfluxDB w konfiguracji (InfluxDB:Token)!");
 
         _org = config["InfluxDB:Org"] ?? "myorg";
         _bucket = config["InfluxDB:Bucket"] ?? "telemetry";

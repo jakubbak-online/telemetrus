@@ -9,12 +9,15 @@
 # Uruchomienie (PowerShell 5.1 lub 7+):
 #   powershell -File scripts\send-measurements.ps1
 #   pwsh -File scripts/send-measurements.ps1
+#   pwsh -File scripts/send-measurements.ps1 -HighValue   # + pomiar 95 (> progu CRIT z docs/influxdb-alert-setup.md), do demo alertow
 #
 # Wymaga: FrontApi uruchomione na http://localhost:5000
 
+[CmdletBinding()] # bez tego nieznane parametry (np. literowka) sa po cichu ignorowane zamiast zglaszac blad
 param(
     [string]$ApiUrl = "http://localhost:5000/measurement",
-    [string]$SecretKey = "telemetrus-demo-shared-secret"
+    [string]$SecretKey = "telemetrus-demo-shared-secret",
+    [switch]$HighValue    # dolacza dodatkowy scenariusz z wartoscia powyzej progu CRIT (do demo realtime alerts)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -164,6 +167,17 @@ Send-Measurement -Label "6. 'value' nie jest liczba (-> 400)" -Payload $payload 
 # SCENARIUSZ 7: niepoprawny Base64
 # ==============================================================
 Send-Measurement -Label "7. NIEPOPRAWNY Base64 (-> 400)" -Payload "!!!-to-nie-jest-base64-!!!" -Checksum "abc"
+
+# ==============================================================
+# SCENARIUSZ 8 (opcjonalny, -HighValue): wartosc powyzej progu CRIT
+# Do demo Realtime Alerts z docs/influxdb-alert-setup.md (CRIT > 80).
+# ==============================================================
+if ($HighValue) {
+    $jsonData = '{"deviceId":"sensor-high","value":95}'
+    $payload  = Encode-Base64 $jsonData
+    $checksum = Compute-Hmac $jsonData $SecretKey
+    Send-Measurement -Label "8. WYSOKA WARTOSC 95 (-> InfluxDB, CRIT > 80 -> powinien wywolac alert)" -Payload $payload -Checksum $checksum
+}
 
 Write-Host ""
 Write-Host "=== Koniec scenariuszy ===" -ForegroundColor Magenta

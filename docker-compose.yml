@@ -13,9 +13,10 @@
 #   - NotificationWebApp (webhook + SignalR + UI alertów) na http://localhost:5002
 #
 # Działa "out of the box" bez żadnej konfiguracji: jeśli nie ma pliku .env,
-# INFLUXDB_ADMIN_TOKEN spada do wbudowanej wartości domyślnej (patrz niżej).
-# Chcesz własny token (np. do współdzielenia InfluxDB poza tym stackiem)?
-# Skopiuj .env.example -> .env i wpisz tam swoją wartość — .env nadpisze domyślną.
+# INFLUXDB_ADMIN_TOKEN spada do wbudowanej wartości domyślnej (patrz niżej) — nie jest
+# to bezpieczny sekret, tylko wartość zaszyta w tym pliku. Chcesz własny token (np. żeby
+# wykorzystać tę instancję poza tym stackiem)? Skopiuj .env.example -> .env i wpisz tam
+# swoją wartość — .env nadpisze domyślną.
 
 services:
   rabbitmq:
@@ -34,6 +35,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Pierwsze uruchomienie na świeżym wolumenie czasem pada na starcie (np. wyścig przy
+    # zapisie .erlang.cookie na Docker Desktop/Windows) — restart policy podnosi kontener
+    # ponownie automatycznie, zamiast zostawiać cały stack zablokowany na depends_on.
+    restart: unless-stopped
 
   influxdb:
     image: influxdb:2.7
@@ -46,12 +51,18 @@ services:
       DOCKER_INFLUXDB_INIT_PASSWORD: admin12345
       DOCKER_INFLUXDB_INIT_ORG: myorg
       DOCKER_INFLUXDB_INIT_BUCKET: telemetry
-      # Token admina: bierze wartość z .env, jeśli plik istnieje, inaczej używa domyślnej
-      # wartości demo poniżej — dzięki temu `docker compose up` działa od razu po sklonowaniu
-      # repo, bez żadnej ręcznej konfiguracji. Ta sama wartość jest automatycznie przekazywana
-      # do telemetryworker (InfluxDB__Token) poniżej. Ręczne wklejanie do
+      # Token admina: bierze wartość z .env, jeśli plik istnieje, inaczej używa domyślnej wartości
+      # demo poniżej — dzięki temu `docker compose up` działa od razu po sklonowaniu repo, bez
+      # żadnej ręcznej konfiguracji. Ta sama wartość jest automatycznie przekazywana do
+      # telemetryworker (InfluxDB__Token) i alertsetup poniżej. Ręczne wklejanie do
       # TelemetryWorker/appsettings.Development.json potrzebne jest tylko w trybie hybrydowym
       # (gdy TelemetryWorker uruchamiasz lokalnie przez `dotnet run`, nie w Dockerze).
+      #
+      # UWAGA przy zmianie tokena PO pierwszym starcie: InfluxDB ustawia token administratora tylko
+      # RAZ, przy pierwszej inicjalizacji wolumenu influxdb_data. Sama zmiana .env i restart NIE
+      # zaktualizuje tokena w już zainicjowanym InfluxDB — worker dostanie 401 Unauthorized i będzie
+      # cicho wysyłał wszystko do DLQ. Żeby wymusić ponowną inicjalizację z nowym tokenem, trzeba
+      # skasować wolumen: `docker compose down -v` (usuwa też dane z InfluxDB i RabbitMQ).
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-telemetrus-demo-influxdb-admin-token}
     volumes:
       - influxdb_data:/var/lib/influxdb2
@@ -61,6 +72,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   frontapi:
     build:
@@ -110,7 +122,31 @@ services:
       - "5002:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
+      # Adres FrontApi wewnątrz sieci Docker — używany przez przycisk "Wyślij testowy pomiar" w UI
+      # (DemoController proxy'uje żądanie do FrontApi). W trybie hybrydowym appsettings.json ma
+      # domyślnie http://localhost:5000, tu nadpisujemy na nazwę serwisu + wewnętrzny port 8080.
+      FrontApi__Url: http://frontapi:8080
     restart: unless-stopped
+
+  # Jednorazowy provisioner: tworzy w InfluxDB Notification Endpoint + Threshold Check +
+  # Notification Rule, zeby alerty (Check -> webhook -> NotificationWebApp -> SignalR -> UI)
+  # dzialaly od razu po `docker compose up`, bez recznej konfiguracji w UI InfluxDB opisanej
+  # w docs/influxdb-alert-setup.md. Konczy dzialanie po wykonaniu (exit 0) — to normalne, nie
+  # dlugo dzialaca usluga. Idempotentny: bezpieczny przy kazdym `docker compose up`.
+  alertsetup:
+    build:
+      context: ./AlertSetup
+    container_name: telemetrus-alertsetup
+    environment:
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-telemetrus-demo-influxdb-admin-token}
+      INFLUXDB_ORG: myorg
+      INFLUXDB_BUCKET: telemetry
+      NOTIFICATION_WEBHOOK_URL: http://notificationwebapp:8080/webhook/influx
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   rabbitmq_data:

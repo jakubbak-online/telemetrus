@@ -15,6 +15,31 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
+// Globalny handler wyjątków — musi być PIERWSZY w pipeline, żeby łapać też błędy spoza akcji
+// kontrolera (np. RabbitMqPublisher rzuca w konstruktorze, gdy RabbitMQ jest nieosiągalne;
+// to dzieje się podczas tworzenia kontrolera przez DI, więc żaden try/catch w akcji tego nie
+// złapie). Bez tego middleware ASPNETCORE_ENVIRONMENT=Development (ustawione w docker-compose.yml,
+// żeby działał Swagger) zwraca klientowi pełny stack trace .NET zamiast czytelnego 500.
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+        logger.LogError(ex, "Nieobsłużony wyjątek podczas przetwarzania żądania {Path}.", context.Request.Path);
+
+        if (!context.Response.HasStarted)
+        {
+            context.Response.Clear();
+            context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            await context.Response.WriteAsJsonAsync(new { error = "Błąd wewnętrzny serwera." });
+        }
+    }
+});
+
 // Middleware do logowania każdego żądania — wywoływany przed każdym requestem
 app.Use(async (context, next) =>
 {

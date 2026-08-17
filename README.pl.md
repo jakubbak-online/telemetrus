@@ -35,18 +35,18 @@ Zrealizowane jako projekt zespołowy (2 osoby), którego celem było przećwicze
 
 - **Architektura oparta o kolejkę** — FrontApi nigdy nie czeka na przetworzenie wiadomości; RabbitMQ rozdziela przyjmowanie danych od ich przetwarzania, z durable queues i persistent messages, więc restart niczego nie gubi.
 - **Weryfikacja integralności z automatycznym dead-letteringiem** — każda wiadomość jest sprawdzana przez worker HMAC-SHA256; wszystko uszkodzone, podrobione lub błędnie sformułowane trafia do DLQ per kanał, zamiast być po cichu odrzucone albo wywalić workera.
-- **Alerty w czasie rzeczywistym** — threshold check w InfluxDB wywołuje webhook, który hub SignalR rozgłasza do każdej podłączonej przeglądarki przez WebSocket, bez pollingu i odświeżania strony.
-- **Przetestowane wydajnościowo, nie tylko zademonstrowane** — plan JMeter generuje 1000 równoległych żądań (20 wątków) przez całą ścieżkę API → kolejka → worker → InfluxDB; szczegóły i wyniki w [jmeter/README.md](jmeter/README.md).
+- **Alerty w czasie rzeczywistym, bez ręcznej konfiguracji** — threshold check w InfluxDB wywołuje webhook, który hub SignalR rozgłasza do każdej podłączonej przeglądarki przez WebSocket, bez pollingu i odświeżania strony. Notification Endpoint, Check i Notification Rule są automatycznie tworzone przez `AlertSetup` przy każdym `docker compose up` — nic nie trzeba klikać w UI InfluxDB.
+- **Test obciążeniowy z przeglądarki albo z JMetera** — UI alertów ma panel burst wysyłający do 1000 żądań/minutę (z konfigurowalnym odsetkiem przekraczającym próg alertu) bezpośrednio z `NotificationWebApp`; do cięższych scenariuszy — plan JMeter generuje 1000 równoległych żądań (20 wątków) przez całą ścieżkę API → kolejka → worker → InfluxDB — szczegóły w [jmeter/README.md](jmeter/README.md).
 - **Testy jednostkowe logiki integralności** — testy xUnit pilnują, że FrontApi i TelemetryWorker liczą identyczne sumy HMAC — na tym założeniu opiera się cały model bezpieczeństwa.
-- **Cały stack jedną komendą** — `docker compose up -d --build` uruchamia całą aplikację (RabbitMQ, InfluxDB i 3 aplikacje .NET) z healthchecks warunkującymi kolejność startu, albo tylko infrastrukturę do lokalnego dev z hot-reloadem.
+- **Cały stack jedną komendą** — `docker compose up -d --build` uruchamia całą aplikację (RabbitMQ, InfluxDB, 3 aplikacje .NET i jednorazowy provisioner alertów) z healthchecks warunkującymi kolejność startu, albo tylko infrastrukturę do lokalnego dev z hot-reloadem.
 
 ## Architektura
 
 ```
-[Klient / JMeter]
+[Klient / JMeter / panel burst]
       │  POST /measurement  (payload Base64 + checksum HMAC + channel)
       ▼
-[FrontApi]  ──►  [RabbitMQ]  ──►  [TelemetryWorker]  ──►  [InfluxDB]
+[FrontApi]  ──►  [RabbitMQ]  ──►  [TelemetryWorker]  ──►  [InfluxDB]  ◄── skonfigurowane raz przez [AlertSetup]
                                                               │ alert (webhook)
                                                               ▼
                                                    [NotificationWebApp]
@@ -66,7 +66,7 @@ Pełny, komponent-po-komponencie opis tego diagramu jest w sekcji [Szczegóły k
 | **InfluxDB 2.x** | Baza czasowa dla pomiarów oraz wbudowany silnik alertów (Checks + Notification Rules) |
 | **SignalR** | Push w czasie rzeczywistym serwer → przeglądarka (WebSocket, z fallbackiem na SSE/long-polling) |
 | **HMAC-SHA256** | Integralność i autentyczność wiadomości między klientem, API i workerem |
-| **Docker Compose** | Cały stack aplikacji (RabbitMQ, InfluxDB i 3 aplikacje .NET) z healthchecks i zależnościami między serwisami — albo sama infrastruktura, do lokalnego dev z hot-reloadem |
+| **Docker Compose** | Cały stack aplikacji (RabbitMQ, InfluxDB, 3 aplikacje .NET i jednorazowy provisioner `AlertSetup`) z healthchecks i zależnościami między serwisami — albo sama infrastruktura, do lokalnego dev z hot-reloadem |
 | **Apache JMeter** | Testy obciążeniowe całego pipeline'u pod równoległym ruchem |
 | **xUnit** | Testy jednostkowe współdzielonej logiki HMAC |
 | **PowerShell** | Skrypty demo i generowania danych testowych |
@@ -79,12 +79,13 @@ Pełny, komponent-po-komponencie opis tego diagramu jest w sekcji [Szczegóły k
 telemetrus/
 ├── FrontApi/              REST API — walidacja i publikacja pomiarów            (port 5000, z Dockerfile)
 ├── TelemetryWorker/       BackgroundService — weryfikacja HMAC, DLQ, zapis do InfluxDB  (z Dockerfile)
-├── NotificationWebApp/    Odbiornik webhooków + hub SignalR + UI alertów na żywo (port 5002, z Dockerfile)
+├── NotificationWebApp/    Odbiornik webhooków + hub SignalR + UI alertów na żywo + panel burst  (port 5002, z Dockerfile)
+├── AlertSetup/            Jednorazowa aplikacja konsolowa — konfiguruje Check/Endpoint/Rule w InfluxDB (z Dockerfile)
 ├── Tests/                 Testy xUnit spójności HMAC między serwisami
 ├── jmeter/                Plan testu JMeter, wygenerowane dane testowe, wyniki
 ├── scripts/                Skrypty PowerShell demo i generowania danych
-├── docs/                  Instrukcje konfiguracyjne (alerty InfluxDB)
-├── docker-compose.yml     Cały stack: RabbitMQ, InfluxDB i 3 aplikacje .NET
+├── docs/                  Instrukcje konfiguracyjne (co robi AlertSetup + ręczny wariant przez UI)
+├── docker-compose.yml     Cały stack: RabbitMQ, InfluxDB, 3 aplikacje .NET, AlertSetup
 ├── README.md / README.pl.md
 └── LICENSE                MIT
 ```
@@ -93,7 +94,7 @@ telemetrus/
 
 Repozytorium nie zawiera prawdziwych sekretów, ale ma działające wartości domyślne do demo, więc **Opcja A nie wymaga żadnej konfiguracji** — `docker compose up -d --build` działa od razu po sklonowaniu.
 
-1. `INFLUXDB_ADMIN_TOKEN` spada do wbudowanej wartości demo (`telemetrus-demo-influxdb-admin-token`) zaszytej w `docker-compose.yml`, gdy nie ma pliku `.env`. To wystarcza, żeby wypróbować projekt. Jeśli chcesz użyć własnego tokena (np. żeby wykorzystać tę instancję InfluxDB gdzie indziej), skopiuj `.env.example` do `.env` i wpisz własną wartość — np. wygenerowaną przez `openssl rand -base64 64`. Plik `.env`, jeśli istnieje, zawsze nadpisuje wartość domyślną.
+1. `INFLUXDB_ADMIN_TOKEN` spada do wbudowanej wartości demo (`telemetrus-demo-influxdb-admin-token`) zaszytej w `docker-compose.yml`, gdy nie ma pliku `.env`. To wystarcza, żeby wypróbować projekt. Jeśli chcesz użyć własnego tokena (np. żeby wykorzystać tę instancję InfluxDB gdzie indziej), skopiuj `.env.example` do `.env` i wpisz własną wartość — np. wygenerowaną przez `openssl rand -base64 64` — **przed pierwszym `docker compose up`**. InfluxDB ustawia token admina tylko raz, przy pierwszej inicjalizacji swojego wolumenu; zmiana `.env` później nic nie da, dopóki nie zrobisz `docker compose down -v` (kasuje dane InfluxDB i RabbitMQ) i nie uruchomisz od nowa.
 2. **Tylko jeśli uruchamiasz TelemetryWorker lokalnie przez `dotnet run`** (Opcja B poniżej) — utwórz `TelemetryWorker/appsettings.Development.json` z wartością tokena (tą samą co w `.env`, jeśli go utworzyłeś; w przeciwnym razie zadziała też domyślna wartość demo powyżej, o ile zgadza się z tym, czym InfluxDB został zainicjowany):
    ```json
    {
@@ -109,13 +110,22 @@ Repozytorium nie zawiera prawdziwych sekretów, ale ma działające wartości do
 
 Nie uruchamiaj Opcji A i Opcji B dla tej samej aplikacji jednocześnie — obie zajmują te same porty hosta (5000/5002), więc druga uruchomiona się wywali.
 
+**Adresy i dane logowania** (te same dla obu opcji — to wartości demo z `docker-compose.yml`, nie prawdziwe sekrety):
+
+| Serwis | URL | Login |
+|---|---|---|
+| FrontApi (Swagger) | [http://localhost:5000/swagger](http://localhost:5000/swagger) | — |
+| NotificationWebApp (UI alertów) | [http://localhost:5002](http://localhost:5002) | — |
+| Panel management RabbitMQ | [http://localhost:15672](http://localhost:15672) | `guest` / `guest` |
+| UI InfluxDB | [http://localhost:8086](http://localhost:8086) | `admin` / `admin12345` |
+
 ### Opcja A — wszystko w Dockerze (najszybszy sposób, żeby zobaczyć działanie)
 
 ```bash
 docker compose up -d --build
 ```
 
-To buduje i uruchamia wszystkie pięć serwisów — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker i NotificationWebApp — z healthchecks warunkującymi kolejność startu. Żaden `dotnet run` nie jest potrzebny, plik `.env` też nie (patrz [Konfiguracja lokalna](#konfiguracja-lokalna)). Przejdź od razu do kroku 3 poniżej.
+To buduje i uruchamia wszystkie sześć serwisów — RabbitMQ, InfluxDB, FrontApi, TelemetryWorker, NotificationWebApp i jednorazowy `AlertSetup` (konfiguruje alerty w InfluxDB i kończy działanie — patrz `docker logs telemetrus-alertsetup`) — z healthchecks warunkującymi kolejność startu. Żaden `dotnet run` nie jest potrzebny, `.env` też nie (patrz [Konfiguracja lokalna](#konfiguracja-lokalna)). Przejdź od razu do kroku 3 poniżej.
 
 ### Opcja B — hybrydowa (infra w Dockerze, aplikacje lokalnie — najlepsza do debugowania/hot-reload)
 
@@ -142,32 +152,36 @@ cd NotificationWebApp && dotnet run   # webhook + SignalR + UI, port 5002
 
 **4. Wyślij testowe pomiary**
 
+Z przeglądarki — UI alertów ma panel **„Wyślij testowy pomiar”** (device ID, wartość, kanał i checkbox „Zepsuj checksum” do demo DLQ) — albo z terminala:
+
 ```powershell
 pwsh scripts/send-measurements.ps1
 ```
 
-Skrypt wysyła serię żądań — poprawnych oraz kilku z celowo błędnym checksum. Co warto obejrzeć przy okazji:
+Skrypt wysyła serię żądań — poprawnych oraz kilku z celowo błędnym checksum. Co warto obejrzeć przy okazji (niezależnie od tego, którą drogą wysyłasz pomiary):
 
 1. logi **FrontApi** — dekodowanie Base64 i wysyłka do kolejki
 2. logi **TelemetryWorker** — `Checksum OK. Zapisuję do InfluxDB...` dla poprawnych, `[DLQ] Odrzucono wiadomość` dla błędnych
 3. **panel RabbitMQ** — kolejki `measurements.*` pustoszeją, `measurements.*.dlq` rośnie
 4. **InfluxDB Data Explorer** — bucket `telemetry`, measurement `sensor_reading`, wykres wartości w czasie
 
+Panel w UI nie rozmawia z FrontApi bezpośrednio z przeglądarki — wysyła żądanie do własnego endpointu `NotificationWebApp`, `POST /demo/measurement`, który liczy HMAC po stronie serwera (ten sam współdzielony sekret co FrontApi/TelemetryWorker) i przekazuje żądanie dalej do FrontApi, dokładnie tak jak zrobiłby to prawdziwy klient. Dzięki temu sekret nie trafia do kodu przeglądarki, a cała ścieżka jest przećwiczona bez modyfikacji.
+
 ## Demo alertów w czasie rzeczywistym
 
-Zgodnie z instrukcją w [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md):
+Alerty są skonfigurowane automatycznie — nie trzeba nic klikać w UI InfluxDB. Przy każdym `docker compose up` `AlertSetup` tworzy (albo potwierdza, że już wcześniej utworzył) Threshold Check na `sensor_reading.value` (CRIT `> 80`, WARN `> 60`, ewaluowany co minutę przy pomocy `max` — nie `mean`, żeby pojedynczy skok nie ginął w uśrednieniu z sąsiednimi normalnymi odczytami), HTTP Notification Endpoint wskazujący na `NotificationWebApp`, i Notification Rule łączącą oba. Sprawdź `docker logs telemetrus-alertsetup`, żeby potwierdzić, że zadziałało; [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md) opisuje dokładnie co się tworzy, jak zmienić progi, oraz równoważną ścieżkę ręczną przez UI (przydatną do debugowania).
 
-1. w InfluxDB utwórz **Threshold Check** na `sensor_reading.value` (np. `> 80`)
-2. dodaj **HTTP Notification Endpoint** — URL zależy od trybu uruchomienia stacku (nazwa serwisu Docker vs. `host.docker.internal`); powyższy dokument opisuje oba warianty
-3. dodaj **Notification Rule** łączącą check z endpointem
-
-Następnie wyślij pomiar przekraczający próg:
+Wyślij pomiar przekraczający próg — przycisk **„Wyślij wysoką wartość (95, demo alertu)”** w UI robi to jednym kliknięciem, albo z terminala:
 
 ```powershell
 pwsh scripts/send-measurements.ps1 -HighValue
 ```
 
-W przeglądarce na `http://localhost:5002` pojawi się alert w czasie rzeczywistym — cała ścieżka od API przez kolejkę, worker, InfluxDB, webhook i SignalR aż do UI zostaje wtedy przećwiczona end-to-end.
+W ciągu do minuty (harmonogram Checka) w przeglądarce na `http://localhost:5002` pojawi się alert w czasie rzeczywistym — cała ścieżka od API przez kolejkę, worker, InfluxDB, Check, webhook i SignalR aż do UI zostaje wtedy przećwiczona end-to-end.
+
+### Test obciążeniowy z przeglądarki (panel burst)
+
+UI alertów ma też panel **„Test obciążeniowy (burst)”** — bez potrzeby konfigurowania JMetera do szybkiego demo. Generuje konfigurowalny ruch (domyślnie: 1000 żądań w 60 sekund, ~5% przekraczających próg CRIT) bezpośrednio z `BurstService` w `NotificationWebApp`, rozłożony równomiernie w czasie i wysyłany po stronie serwera (nie z timera w karcie przeglądarki, który mocno zwalnia po utracie fokusu). Postęp streamuje się na żywo przez to samo połączenie SignalR co alerty (zdarzenia `BurstProgress`/`BurstFinished`) — liczniki wysłano/OK/błędy/powyżej progu aktualizują się w czasie rzeczywistym — a każde przekroczenie progu w trakcie przebiegu pojawia się jako alert dokładnie tak samo jak przy pojedynczym wysokim pomiarze.
 
 ## Testy
 
@@ -273,7 +287,7 @@ Dzięki temu DLQ zawiera wyłącznie błędy integralności / uszkodzone wiadomo
 Baza czasowa (time-series). Przechowuje pomiary w bucket'cie `telemetry` (organizacja `myorg`).
 
 - każdy pomiar to punkt: `sensor_reading,deviceId=<id> value=<float> <timestamp>`
-- alerty konfigurowane w UI InfluxDB ([docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md)): check (np. `value > 80`) + notification rule wysyłają HTTP POST (webhook) do NotificationWebApp
+- alerty (Threshold Check + Notification Endpoint + Notification Rule) konfigurowane automatycznie przez `AlertSetup` (patrz niżej), nie klikane ręcznie w UI — check (`value > 80` CRIT / `> 60` WARN, agregacja `max`) + notification rule wysyłają HTTP POST (webhook) do NotificationWebApp
 
 **Przykładowe zapytania Flux:**
 
@@ -298,9 +312,15 @@ Most między InfluxDB a użytkownikiem końcowym.
 
 - **webhook endpoint** (`POST /webhook/influx`) przyjmuje payload alertu z InfluxDB, wyciąga `_message` i `_level`
 - **SignalR hub** (`/alertHub`) rozgłasza alert do wszystkich podłączonych klientów metodą `ReceiveAlert`
-- **UI** ([wwwroot/index.html](NotificationWebApp/wwwroot/index.html)): strona w przeglądarce pokazująca status połączenia i listę alertów na żywo, z kolorowaniem wg poziomu (crit/warn/info/ok)
+- **demo endpoint** (`POST /demo/measurement`) liczy HMAC po stronie serwera i przekazuje testowy pomiar do FrontApi — stoi za panelem „Wyślij testowy pomiar” w UI, alternatywą dla `scripts/send-measurements.ps1` bezpośrednio z przeglądarki
+- **endpointy burst** (`POST /demo/burst/start`, `/stop`, `GET /status`) startują/zatrzymują [BurstService.cs](NotificationWebApp/BurstService.cs) — singleton rozkładający w czasie tysiące podpisanych HMAC pomiarów przy konfigurowalnym tempie i raportujący postęp na żywo przez ten sam hub SignalR (`BurstStarted`/`BurstProgress`/`BurstFinished`) — stoi za panelem „Test obciążeniowy”
+- **UI** ([wwwroot/index.html](NotificationWebApp/wwwroot/index.html)): strona w przeglądarce pokazująca status połączenia, listę alertów na żywo z kolorowaniem wg poziomu (crit/warn/info/ok), formularz do wysyłania testowych pomiarów oraz panel testu obciążeniowego
 
-### 7. Przeglądarka, [http://localhost:5002](http://localhost:5002)
+### 7. AlertSetup ([AlertSetup/](AlertSetup/)) — uruchamia się raz i kończy działanie
+
+Mała aplikacja konsolowa, nie długo działająca usługa. Przy starcie stacku (po tym, jak InfluxDB przejdzie healthcheck) woła REST API InfluxDB, żeby utworzyć Notification Endpoint, Threshold Check i Notification Rule opisane w [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md) — te same trzy zasoby, które inaczej trzeba by kliknąć ręcznie. Szuka zasobów po nazwie przed utworzeniem, więc ponowne uruchomienie (każdy `docker compose up` to robi) nic nie zmienia, gdy już istnieją.
+
+### 8. Przeglądarka, [http://localhost:5002](http://localhost:5002)
 
 Klient SignalR utrzymujący otwarte połączenie WebSocket. Każdy nowy alert z InfluxDB pojawia się natychmiast, bez odświeżania strony.
 
@@ -335,7 +355,13 @@ Klient SignalR utrzymujący otwarte połączenie WebSocket. Każdy nowy alert z 
 
 **Budowanie obrazu `frontapi` / `telemetryworker` / `notificationwebapp` pada błędem `NETSDK1064: Package ... was not found`.** Oznacza to, że lokalne, przestarzałe artefakty `bin/`/`obj/` zostały skopiowane do obrazu i nadpisały świeży restore NuGet wykonany w kontenerze. Każdy katalog serwisu ma własny plik `.dockerignore`, który temu zapobiega (Docker honoruje `.dockerignore` tylko w katalogu głównym kontekstu builda, a kontekst każdego serwisu to jego własny podkatalog — `.dockerignore` z katalogu głównego repo tu nie działa). Jeśli mimo to się to zdarzy, usuń lokalne foldery `bin/`/`obj/` dla tego serwisu i przebuduj przez `docker compose build --no-cache <service>`.
 
+**Worker cicho wysyła wszystko do DLQ z błędem 401 Unauthorized w logach, mimo że `.env` wygląda poprawnie.** Prawdopodobnie zmieniłeś `INFLUXDB_ADMIN_TOKEN` w `.env` *po* tym, jak stack już raz wystartował. InfluxDB ustawia token admina tylko przy pierwszej inicjalizacji swojego wolumenu — późniejsza zmiana `.env` czy `docker compose restart` tego nie zaktualizuje, więc token workera przestaje pasować. Rozwiązanie: `docker compose down -v` (kasuje dane InfluxDB i RabbitMQ, wymuszając czystą inicjalizację), potem znowu `docker compose up -d --build`.
+
 **Port zajęty / kontener nie może się zbindować do 5000 albo 5002.** Prawdopodobnie masz jednocześnie uruchomioną Opcję A (Docker) i Opcję B (`dotnet run`) dla tej samej aplikacji. Zatrzymaj jedną, zanim uruchomisz drugą, np. `docker compose stop frontapi`.
+
+**Kontener `rabbitmq` pada zaraz po pierwszym `docker compose up` na świeżym wolumenie.** Znany wyścig na starcie na niektórych konfiguracjach Docker Desktop (błąd uprawnień `.erlang.cookie` w `docker logs telemetrus-rabbitmq`). `restart: unless-stopped` w `docker-compose.yml` podnosi go automatycznie w ciągu kilku sekund — `frontapi`/`telemetryworker` po prostu dłużej czekają na bramkę `depends_on: service_healthy`. Jeśli sam się nie podniesie, uruchom ponownie `docker compose up -d`.
+
+**Wysłanie pomiaru z wysoką wartością nie generuje alertu.** Sprawdź `docker logs telemetrus-alertsetup` — jeśli widać błędy (zwykle bo InfluxDB nie zdążyło wystartować za pierwszym razem), uruchom ponownie: `docker compose up alertsetup`. Jeśli pokazuje, że wszystkie trzy zasoby już istnieją — Check działa na harmonogramie co 1 minutę, poczekaj do minuty po wysłaniu pomiaru. Jeśli to seria pomiarów, nie pojedynczy — Check agreguje przez `max` właśnie po to, żeby pojedyncze skoki nie ginęły w uśrednieniu; Check ręcznie przełączony z powrotem na `mean` rzadko przekroczy próg pod obciążeniem. Zobacz [docs/influxdb-alert-setup.md](docs/influxdb-alert-setup.md), co dokładnie konfiguruje `alertsetup` i jak to sprawdzić/dostosować.
 
 </details>
 

@@ -76,6 +76,83 @@
             border-radius: 8px;
         }
 
+        .panel {
+            background: #1b1f26;
+            border: 1px solid #3a4048;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-bottom: 20px;
+        }
+        .panel h2 { margin-top: 0; font-size: 1.1em; color: #d7dce3; }
+        .form-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 10px;
+        }
+        .form-row label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.9em;
+            color: #b6bcc6;
+        }
+        .form-row input[type="text"],
+        .form-row input[type="number"] {
+            background: #14171c;
+            border: 1px solid #3a4048;
+            color: #d7dce3;
+            border-radius: 4px;
+            padding: 6px 8px;
+            width: 130px;
+        }
+        .form-row select {
+            background: #14171c;
+            border: 1px solid #3a4048;
+            color: #d7dce3;
+            border-radius: 4px;
+            padding: 6px 8px;
+        }
+        button.secondary { background: #3a4048; color: #d7dce3; }
+        button.secondary:hover { background: #4a5058; }
+        #measurementResult {
+            margin-top: 8px;
+            padding: 8px 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            white-space: pre-wrap;
+            word-break: break-all;
+            display: none;
+        }
+        #measurementResult.ok { display: block; background: #1e2b22; color: #8fd6a6; border: 1px solid #2f4a38; }
+        #measurementResult.err { display: block; background: #2b1e22; color: #e79aab; border: 1px solid #4a2f38; }
+        #measurementResult.pending { display: block; background: #14171c; color: #8b93a1; }
+
+        .progress-bar {
+            background: #14171c;
+            border: 1px solid #3a4048;
+            border-radius: 4px;
+            height: 18px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        .progress-fill {
+            background: #5b9dd9;
+            height: 100%;
+            width: 0%;
+            transition: width 0.2s ease;
+        }
+        .progress-fill.done { background: #6cbf84; }
+        .progress-fill.cancelled { background: #e0c46c; }
+        #burstStatus {
+            margin-top: 6px;
+            font-size: 0.85em;
+            color: #b6bcc6;
+            font-family: monospace;
+        }
+
         @keyframes slideIn {
             from { opacity: 0; transform: translateY(-10px); }
             to { opacity: 1; transform: translateY(0); }
@@ -101,6 +178,43 @@
         <span id="status" class="connecting">Łączę...</span>
         <button onclick="clearAlerts()">Wyczyść</button>
         <button onclick="sendTestAlert()">Testowy alert</button>
+    </div>
+
+    <div class="panel">
+        <h2>Wyślij testowy pomiar</h2>
+        <div class="form-row">
+            <label>Device ID <input type="text" id="deviceId" value="demo-sensor" /></label>
+            <label>Wartość <input type="number" id="value" value="42" step="any" /></label>
+            <label>Kanał
+                <select id="channel">
+                    <option value="default">default</option>
+                    <option value="temperature">temperature</option>
+                    <option value="humidity">humidity</option>
+                    <option value="pressure">pressure</option>
+                </select>
+            </label>
+            <label><input type="checkbox" id="breakChecksum" /> Zepsuj checksum (demo DLQ)</label>
+        </div>
+        <div class="form-row">
+            <button onclick="sendMeasurement()">Wyślij pomiar</button>
+            <button class="secondary" onclick="sendHighValueMeasurement()">Wyślij wysoką wartość (95, demo alertu)</button>
+        </div>
+        <div id="measurementResult"></div>
+    </div>
+
+    <div class="panel">
+        <h2>Test obciążeniowy (burst)</h2>
+        <div class="form-row">
+            <label>Liczba wysłań <input type="number" id="burstCount" value="1000" min="1" max="20000" /></label>
+            <label>Czas trwania (s) <input type="number" id="burstDuration" value="60" min="1" max="900" /></label>
+            <label>% powyżej progu <input type="number" id="burstHighPct" value="5" min="0" max="100" step="1" /></label>
+        </div>
+        <div class="form-row">
+            <button onclick="startBurst()">Start</button>
+            <button class="secondary" onclick="stopBurst()">Stop</button>
+        </div>
+        <div class="progress-bar"><div id="burstProgressFill" class="progress-fill"></div></div>
+        <div id="burstStatus">Brak aktywnego testu.</div>
     </div>
 
     <h2>Strumień alertów:</h2>
@@ -183,6 +297,102 @@
                     message: 'Testowy alert z przycisku UI — ' + new Date().toLocaleTimeString('pl-PL')
                 })
             }).catch(err => console.error(err));
+        }
+
+        // Wysyła testowy pomiar przez serwerowy proxy /demo/measurement (NotificationWebApp
+        // liczy HMAC i przekazuje żądanie do FrontApi — dokładnie ścieżką prawdziwego klienta:
+        // FrontApi -> RabbitMQ -> TelemetryWorker -> InfluxDB, z pełną walidacją po drodze).
+        async function sendMeasurement(overrides) {
+            const body = {
+                deviceId: overrides?.deviceId ?? document.getElementById('deviceId').value,
+                value: overrides?.value ?? parseFloat(document.getElementById('value').value),
+                channel: overrides?.channel ?? document.getElementById('channel').value,
+                breakChecksum: overrides?.breakChecksum ?? document.getElementById('breakChecksum').checked
+            };
+
+            const resultEl = document.getElementById('measurementResult');
+            resultEl.className = 'pending';
+            resultEl.textContent = 'Wysyłam...';
+
+            try {
+                const res = await fetch('/demo/measurement', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+
+                // textContent, nie innerHTML — treść odpowiedzi API nie jest tu zaufana
+                resultEl.className = res.ok ? 'ok' : 'err';
+                resultEl.textContent = `HTTP ${res.status}: ${JSON.stringify(data)}`;
+            } catch (err) {
+                resultEl.className = 'err';
+                resultEl.textContent = 'Błąd połączenia: ' + err;
+            }
+        }
+
+        function sendHighValueMeasurement() {
+            sendMeasurement({ deviceId: 'sensor-high', value: 95, channel: 'default', breakChecksum: false });
+        }
+
+        // ---- Test obciążeniowy (burst) ----
+        // Przebieg jest liczony i wysyłany po stronie serwera (NotificationWebApp), nie w pętli JS
+        // w przeglądarce — przeglądarki mocno tnę tempo timerów w nieaktywnej karcie, co zepsułoby
+        // tempo 1000/60s. Postęp przychodzi tu wyłącznie przez zdarzenia SignalR poniżej.
+        const burstStatusEl = document.getElementById('burstStatus');
+        const burstFillEl = document.getElementById('burstProgressFill');
+
+        connection.on('BurstStarted', (data) => {
+            burstFillEl.className = 'progress-fill';
+            burstFillEl.style.width = '0%';
+            burstStatusEl.textContent = `Start: 0 / ${data.totalCount} (cel: ${data.durationSeconds}s)...`;
+        });
+
+        connection.on('BurstProgress', (data) => {
+            const pct = Math.round((data.sent / data.total) * 100);
+            burstFillEl.style.width = pct + '%';
+            burstStatusEl.textContent =
+                `${data.sent}/${data.total} wysłano — OK: ${data.ok}, błędy: ${data.failed}, ` +
+                `>próg: ${data.highValueSent} — ${data.elapsedSeconds.toFixed(1)}s`;
+        });
+
+        connection.on('BurstFinished', (data) => {
+            burstFillEl.style.width = '100%';
+            burstFillEl.className = 'progress-fill ' + (data.cancelled ? 'cancelled' : 'done');
+            burstStatusEl.textContent =
+                `${data.cancelled ? 'Przerwano' : 'Zakończono'}: ${data.sent} wysłano, OK: ${data.ok}, ` +
+                `błędy: ${data.failed}, >próg: ${data.highValueSent}, czas: ${data.elapsedSeconds.toFixed(1)}s. ` +
+                `Alert (jeśli Check jest skonfigurowany) pojawi się poniżej w ciągu do 1 minuty.`;
+        });
+
+        async function startBurst() {
+            const body = {
+                totalCount: parseInt(document.getElementById('burstCount').value, 10),
+                durationSeconds: parseInt(document.getElementById('burstDuration').value, 10),
+                highValueRatio: parseFloat(document.getElementById('burstHighPct').value) / 100
+            };
+
+            try {
+                const res = await fetch('/demo/burst/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                if (!res.ok) {
+                    const data = await res.json();
+                    burstStatusEl.textContent = 'Nie można uruchomić: ' + (data.error || res.status);
+                }
+            } catch (err) {
+                burstStatusEl.textContent = 'Błąd połączenia: ' + err;
+            }
+        }
+
+        async function stopBurst() {
+            try {
+                await fetch('/demo/burst/stop', { method: 'POST' });
+            } catch (err) {
+                burstStatusEl.textContent = 'Błąd połączenia: ' + err;
+            }
         }
     </script>
 </body>

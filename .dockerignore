@@ -3,7 +3,8 @@
 # .dockerignore placed inside that subfolder — this root-level file is NOT
 # picked up for those builds. Each service directory has its own copy
 # (FrontApi/.dockerignore, TelemetryWorker/.dockerignore,
-# NotificationWebApp/.dockerignore); keep them in sync with this one.
+# NotificationWebApp/.dockerignore, AlertSetup/.dockerignore); keep them in
+# sync with this one.
 **/bin/
 **/obj/
 **/.vs/

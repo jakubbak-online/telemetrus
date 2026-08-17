@@ -1,5 +1,12 @@
 # Konfiguracja alertu i webhooka w InfluxDB
 
+> **Od `docker compose up` to dzieje się automatycznie.** Usługa `alertsetup` (projekt
+> [AlertSetup/](../AlertSetup/)) tworzy Notification Endpoint, Threshold Check i Notification Rule
+> opisane niżej przez REST API InfluxDB, przy każdym starcie stacku — nic nie trzeba klikać ręcznie.
+> Ten dokument zostaje jako: (a) wyjaśnienie co dokładnie `alertsetup` konfiguruje i dlaczego,
+> (b) instrukcja, gdy chcesz zmienić progi/nazwy przez UI zamiast edytować [AlertSetup/Program.cs](../AlertSetup/Program.cs),
+> (c) ścieżka ręczna, gdyby `alertsetup` z jakiegoś powodu zawiódł (patrz [Rozwiązywanie problemów](#rozwiązywanie-problemów) niżej).
+
 Ta instrukcja opisuje jak skonfigurować regułę alertową w InfluxDB 2.x, która przy przekroczeniu progu wartości wyśle webhook do NotificationWebApp.
 
 ## 1. Logowanie do InfluxDB
@@ -41,7 +48,7 @@ pwsh scripts/send-measurements.ps1
    - From: bucket `telemetry`
    - Filter: `_measurement = sensor_reading`
    - Filter: `_field = value`
-   - Aggregate: `mean` co `1 minute`
+   - Aggregate: `max` co `1 minute` (NIE `mean` — uśrednianie rozmywa pojedyncze skoki przy większym ruchu, np. w panelu „Test obciążeniowy”; `max` łapie każdy odczyt powyżej progu)
 3. **Configure Check:**
    - **Name:** `Wysoka wartość pomiaru`
    - **Schedule Every:** `1m`
@@ -69,7 +76,7 @@ pwsh scripts/send-measurements.ps1
 
 1. Uruchom NotificationWebApp: `cd NotificationWebApp && dotnet run` (tylko w trybie hybrydowym — w pełnym Dockerze już działa dzięki `docker compose up -d --build`)
 2. Otwórz UI: http://localhost:5002
-3. Wygeneruj pomiar przekraczający próg:
+3. Wygeneruj pomiar przekraczający próg — najprościej: `pwsh scripts/send-measurements.ps1 -HighValue` (dokłada scenariusz z wartością 95). Albo ręcznie:
    ```powershell
    # wartość 95 — powyżej progu CRIT (80)
    $json = '{"deviceId":"sensor-high","value":95}'
@@ -98,11 +105,35 @@ curl -X POST http://localhost:5002/webhook/test \
 
 Alert pojawi się natychmiast w UI.
 
-## Alternatywa: plik JSON (programowa konfiguracja)
+## Automatyczna konfiguracja (AlertSetup)
 
-Można też skonfigurować alert przez API InfluxDB używając taska Flux — ale UI jest znacznie prostsze dla demo.
+To, co kroki 3-5 każą kliknąć ręcznie, robi automatycznie przez REST API InfluxDB usługa
+`alertsetup` — mały konsolowy projekt .NET w [AlertSetup/](../AlertSetup/), uruchamiany raz przy
+każdym `docker compose up` (po tym, jak `influxdb` przejdzie healthcheck), zaraz kończący
+działanie (exit 0 — to normalne, nie długo działająca usługa). Idempotentny: szuka zasobów po
+nazwie przed utworzeniem, więc bezpieczny do wielokrotnego uruchamiania.
+
+Żeby zmienić progi (`> 80` / `> 60` / `< 50`), nazwy zasobów albo harmonogram — edytuj
+[AlertSetup/Program.cs](../AlertSetup/Program.cs) i przebuduj: `docker compose up -d --build alertsetup`
+(albo po prostu zrób to ręcznie w UI wg kroków 3-5 wyżej — `alertsetup` wykrywa istniejące zasoby
+po nazwie i nie tworzy duplikatów, ale też nie nadpisuje ręcznych zmian w już istniejących).
+
+**Pułapka przy tworzeniu Check przez API, nie UI:** Check utworzony przez `POST /api/v2/checks`
+bez pola `tags` (a UI je ustawia automatycznie) generuje zadanie Flux z `tags: {}`. W efekcie
+`${r.deviceId}` ORAZ `${r._value}` w `statusMessageTemplate` bywają `null` przy realnych danych i
+wywalają task błędem `interpolated expression produced a null value` — ale TYLKO gdy jest
+faktycznie coś do zaraportowania (okna bez przekroczenia progu "udają", że działa, bo nie ma nic
+do interpolacji). Dlatego `AlertSetup`'s `statusMessageTemplate` używa tylko bezpiecznych
+`${r._check_name}` i `${r._level}` — `deviceId`/`value` i tak trafiają do webhooka jako osobne pola
+najwyższego poziomu, więc UI pokazuje je w sekcji „raw” alertu.
 
 ## Rozwiązywanie problemów
+
+**Alert w ogóle się nie pojawia mimo wysokiej wartości:** Sprawdź czy `alertsetup` faktycznie
+skonfigurował zasoby: `docker logs telemetrus-alertsetup`. Jeśli tam błąd (np. InfluxDB nie
+zdążyło wystartować) — uruchom ponownie: `docker compose up alertsetup`. Jeśli zasoby istnieją,
+ale alert i tak nie przychodzi w ciągu ~1 minuty — sprawdź logi taska Check w UI InfluxDB
+(**Alerts → Checks → [nazwa checka] → widok historii uruchomień**) pod kątem błędów runtime.
 
 **Webhook nie dochodzi do WebApp:**
 - Sprawdź adres URL zgodnie z trybem uruchomienia (patrz krok 3 wyżej):
